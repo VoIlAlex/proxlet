@@ -20,9 +20,9 @@
 
 ## 4. Challenges, redirect and TLS in the engine (proxlet-server)
 
-- [ ] 4.1 Add the challenge map and serve `GET /.well-known/acme-challenge/<token>` before rules on every origin; fall through to the rules for unknown tokens; verify with server tests for "Challenge answered" (both listeners) and "Unknown token" (the file is served)
-- [ ] 4.2 Add `TlsView` and the redirect (decision 4): `308` to `https://host[:port]/path?query`, using the effective scheme per origin; verify with server tests for "Redirected", a non-443 port, "Host without a certificate", "HTTPS not available", "Redirect off", the challenge exemption, and `X-Forwarded-Proto: https` from the front origin
-- [ ] 4.3 Add `Origin::Tls`, the SNI resolver over an `ArcSwap` map, and TLS accept with the per-connection handshake, a 10 s timeout and ALPN `h2`/`http/1.1` (decision 5); verify with server tests that the handshake picks the right certificate, an unknown name or no SNI fails, HTTP/2 is negotiated, `wss://` works, `X-Forwarded-Proto: https` reaches the upstream, and swapping the map leaves an open connection working while the next handshake gets the new certificate
+- [x] 4.1 Add the challenge map and serve `GET /.well-known/acme-challenge/<token>` before rules on every origin; fall through to the rules for unknown tokens; verify with server tests for "Challenge answered" (both listeners) and "Unknown token" (the file is served)
+- [x] 4.2 Add `TlsView` and the redirect (decision 4): `308` to `https://host[:port]/path?query`, using the effective scheme per origin; verify with server tests for "Redirected", a non-443 port, "Host without a certificate", "HTTPS not available", "Redirect off", the challenge exemption, and `X-Forwarded-Proto: https` from the front origin
+- [x] 4.3 Add `Origin::Tls`, the SNI resolver over an `ArcSwap` map, and TLS accept with the per-connection handshake, a 10 s timeout and ALPN `h2`/`http/1.1` (decision 5); verify with server tests that the handshake picks the right certificate, an unknown name or no SNI fails, HTTP/2 is negotiated, `wss://` works, `X-Forwarded-Proto: https` reaches the upstream, and swapping the map leaves an open connection working while the next handshake gets the new certificate
 
 ## 5. Daemon: HTTPS port, issuance and renewal (proxlet)
 

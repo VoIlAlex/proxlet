@@ -23,8 +23,10 @@ hyper-util = { version = "0.1.21", features = ["server", "server-auto", "server-
 mime_guess = "2.0.5"
 percent-encoding = "2.3.2"
 proxlet-core = { version = "0.1.0", path = "../proxlet-core" }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "time", "fs", "io-util", "sync"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 tracing = "0.1.44"
 
@@ -33,8 +35,11 @@ bytes = "1.12.2"
 futures-util = "0.3.34"
 http = "1.5.0"
 http-body-util = "0.1.5"
-hyper = { version = "1.12.0", features = ["server", "client", "http1"] }
+hyper = { version = "1.12.0", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1.21", features = ["tokio", "server"] }
+proxlet-cert = { version = "0.1.0", path = "../proxlet-cert", features = ["test-support"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = "0.30.0"
