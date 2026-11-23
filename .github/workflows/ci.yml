@@ -42,8 +42,56 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
 
+  systemd:
+    name: systemd service (end to end)
+    # GitHub's Ubuntu runners boot with systemd, so this exercises the real flow.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: start, add, request, stop
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          mkdir -p "$HOME/site"
+          echo "hello from proxlet" > "$HOME/site/index.html"
+
+          sudo "$P" start
+          "$P" status | grep -q "systemd service"
+          # The service runs as the user who ran sudo, not as root.
+          test "$(systemctl show proxlet.service --property=User --value)" = "$USER"
+          systemctl is-enabled proxlet.service
+
+          # Rules apply live, without sudo.
+          "$P" add /site "$HOME/site"
+          curl -fsS http://127.0.0.1/site/ | grep -q "hello from proxlet"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/nope)" = 404
+          sudo "$P" start | grep -q "already running"
+
+          sudo "$P" stop
+          if "$P" status; then echo "still running after stop"; exit 1; fi
+          if systemctl is-enabled proxlet.service; then echo "still enabled after stop"; exit 1; fi
+          if curl -fsS http://127.0.0.1/site/; then echo "still serving after stop"; exit 1; fi
+          "$P" ls | grep -q "^/site"
+          sudo "$P" stop | grep -q "not running"
+      - name: a failed start is explained
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          sudo python3 -m http.server 80 --bind 0.0.0.0 >/dev/null 2>&1 &
+          sleep 1
+          if out=$(sudo "$P" start 2>&1); then echo "start succeeded on a taken port"; exit 1; fi
+          echo "$out"
+          echo "$out" | grep -q "port 80 is already in use"
+          if systemctl is-enabled proxlet.service; then echo "left enabled after failure"; exit 1; fi
+      - name: service log
+        if: failure()
+        run: sudo journalctl -u proxlet.service --no-pager -n 100
+
   msrv:
-    name: msrv (1.85)
+    name: msrv (1.89)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -51,6 +99,6 @@ jobs:
       # does not mistake the MSRV for an outdated action version.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: "1.89"
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --locked

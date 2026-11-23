@@ -61,14 +61,30 @@ already running SHALL succeed and say so.
 
 ### Requirement: Unsupported service manager
 
-On a host with no supported service manager, `proxlet start` and `proxlet stop`
-SHALL exit non-zero, say which service managers are supported, and point to
-`proxlet run`.
+On a host with no supported service manager, `proxlet start` SHALL exit
+non-zero, say which service managers are supported, and point to `proxlet run`.
+`proxlet stop` SHALL do the same unless a foreground server is running.
 
 #### Scenario: Start on macOS
 
 - **WHEN** the user runs `proxlet start` on macOS
 - **THEN** the command exits non-zero, says no supported service manager was found, and suggests `proxlet run`
+
+#### Scenario: Stop on macOS with nothing running
+
+- **WHEN** no proxlet is running and the user runs `proxlet stop` on macOS
+- **THEN** the command exits non-zero, says proxlet is not running and which service managers are supported, and suggests `proxlet run`
+
+### Requirement: Root is needed only to install
+
+`proxlet start` and `proxlet stop` SHALL tell the user to re-run them with
+`sudo` when they need to install, start or stop the system service without
+root, and SHALL change nothing in that case.
+
+#### Scenario: Start without root
+
+- **WHEN** a non-root user runs `proxlet start` on a systemd host and proxlet is not running
+- **THEN** the command exits non-zero, suggests `sudo proxlet start`, and installs nothing
 
 ### Requirement: Stop the service
 
@@ -85,6 +101,11 @@ service is not running SHALL succeed and say so.
 
 - **WHEN** the service is not running and the user runs `proxlet stop`
 - **THEN** the command says proxlet is not running and exits zero
+
+#### Scenario: Stop a foreground server
+
+- **WHEN** proxlet was started with `proxlet run` and the user runs `proxlet stop`
+- **THEN** that server shuts down gracefully, and the command says so and exits zero
 
 ### Requirement: Status
 

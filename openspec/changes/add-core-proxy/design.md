@@ -47,8 +47,12 @@ and lets a slow writer stall traffic.
 
 ### 3. One TOML file, edited in place
 
-Rules and settings live in one `proxlet.toml` (`[settings]` and `[[rule]]`),
-edited with `toml_edit` so hand-written comments and ordering survive CLI edits.
+Rules and settings live in one `proxlet.toml`, edited with `toml_edit` so
+hand-written comments and ordering survive CLI edits. Settings sit in one table
+per key group (`[listen]`, `[static]`, `[proxy]`), so the dotted key
+`static.listing` is literally `listing` in `[static]`. Each rule is a `[[rule]]`
+with `route` and exactly one of `proxy` (a URL) or `files` (an absolute path).
+A setting changed back to its default is removed from the file.
 Writes go to a temp file in the same directory followed by `rename`, under an
 advisory file lock so two CLI invocations cannot interleave.
 
@@ -90,10 +94,17 @@ daemon as the user who invoked `sudo proxlet start` (`SUDO_USER`), with
 - `proxlet add /files .` can read the user's own files without a root daemon
   serving arbitrary paths.
 - The config file, socket and state live in that user's directories
-  (`$XDG_CONFIG_HOME/proxlet`, `$XDG_RUNTIME_DIR/proxlet` with a state-dir
-  fallback), so `add` / `rm` / `ls` / `config` never need sudo.
+  (`$XDG_CONFIG_HOME/proxlet` and `$XDG_STATE_HOME/proxlet`), so `add` / `rm` /
+  `ls` / `config` never need sudo. The unit passes both directories to the
+  daemon explicitly (`PROXLET_CONFIG_DIR`, `PROXLET_STATE_DIR`), so CLI and
+  daemon cannot disagree.
+- The socket lives in the state directory, not `$XDG_RUNTIME_DIR`: a system
+  service does not get the user's runtime directory, and the CLI and the daemon
+  must agree on the path. If the path exceeds the ~100-byte Unix socket limit,
+  it moves to `/tmp/proxlet-<uid>/<hash>.sock`, a 0700 directory that the daemon
+  refuses to use if another user owns it.
 - When `proxlet start` is run directly as root, the daemon runs as root and uses
-  `/etc/proxlet` and `/run/proxlet`.
+  `/etc/proxlet` and `/var/lib/proxlet`.
 
 `PROXLET_HOME` overrides all locations; tests and CI rely on it.
 
@@ -156,7 +167,21 @@ work when the daemon is stopped.
 - [macOS has no service manager implementation] → `start` fails with a pointer to
   `proxlet run`; the trait makes launchd a self-contained follow-up.
 
+### 12. Implementation notes
+
+- **Minimum Rust 1.89**, for `std::fs::File::lock` (the config-file lock) and
+  let-chains, instead of adding a locking crate.
+- **`https://` upstreams** use rustls with the Mozilla root store (webpki-roots),
+  so they behave the same on every host.
+- **Readiness.** `start` waits for the daemon to answer on its control socket,
+  rather than trusting the service manager's "active" state. A crash-and-retry
+  (`Restarting`) or `Failed` state ends the wait early. The daemon's own
+  `error:` line and hints are then lifted from the journal, and the service is
+  stopped so it doesn't retry in a loop.
+- **`stop`** also stops a foreground `proxlet run`, through the control socket.
+
 ## Open Questions
 
-- Shutdown grace period default (proposed 10s) and whether it should be a setting.
-- Whether `proxlet ls` should show upstream reachability, or leave that to `monitor`.
+- Whether `proxlet ls` should show upstream reachability, or leave that to
+  `monitor`. The shutdown grace period is a fixed 10s for now; make it a setting
+  if anyone needs it.

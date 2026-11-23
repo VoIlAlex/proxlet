@@ -140,6 +140,11 @@ setting is on, and `404` when it is off.
 - **WHEN** `static.listing` is off and a request arrives for a directory without `index.html`
 - **THEN** the response status is 404
 
+#### Scenario: Directory without a trailing slash
+
+- **WHEN** a request arrives for `/files/docs?x=1` and `docs` is a directory
+- **THEN** the response is a 301 redirect to `/files/docs/?x=1`, so relative links in the page resolve
+
 ### Requirement: Staying inside the served directory
 
 A files rule SHALL never serve content from outside its directory, whether

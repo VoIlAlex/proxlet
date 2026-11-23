@@ -41,7 +41,8 @@ Three areas are built to be extended, each behind one trait in its own crate:
 - **AI tools** (`crates/proxlet-ai`) — one module per tool.
 
 A new integration should be a new module implementing the trait, with no changes
-to the engine or to other integrations.
+to the engine or to other integrations. [docs/extending.md](docs/extending.md)
+walks through adding one, step by step.
 
 ## Pull requests
 
