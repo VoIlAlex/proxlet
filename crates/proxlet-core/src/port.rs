@@ -147,8 +147,15 @@ mod tests {
         assert_eq!(parse_lsof(""), None);
     }
 
+    /// Serialises the tests that bind ports: once one test frees its port,
+    /// another running in parallel could be handed the same one.
+    static PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn detects_listening_and_free_ports() {
+        let _guard = PORTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         assert!(is_listening("127.0.0.1", port, Duration::from_millis(500)));
@@ -158,6 +165,9 @@ mod tests {
 
     #[test]
     fn finds_own_process_as_holder() {
+        let _guard = PORTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         if let Some(h) = holder(port) {
