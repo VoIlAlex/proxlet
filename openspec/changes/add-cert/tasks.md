@@ -14,9 +14,9 @@
 
 ## 3. ACME client (proxlet-cert)
 
-- [ ] 3.1 Add the `Ca` trait (decision 1) and the order flow: account per server (`<state>/acme/<server-id>/account.json`, P-256, no email), terms check, order, HTTP-01 challenge handed to a `ChallengeSink`, poll, finalize with a fresh P-256 key, store; verify with tests over a fake `Ca` for success, terms needed, a failed challenge (error names the domain and the CA's detail) and a timeout
+- [x] 3.1 Add the `Ca` trait (decision 1) and the order flow: account per server (`<state>/acme/<server-id>/account.json`, P-256, no email), terms check, order, HTTP-01 challenge handed to a `ChallengeSink`, poll, finalize with a fresh P-256 key, store; verify with tests over a fake `Ca` for success, terms needed, a failed challenge (error names the domain and the CA's detail) and a timeout
 - [ ] 3.2 Implement `Ca` with `instant-acme` (`ring`); map `production` and `staging` to Let's Encrypt's directory URLs; allow extra trusted roots through `PROXLET_ACME_ROOTS` (a PEM file, for Pebble in tests); verify with a test that runs against Pebble when `PEBBLE_DIRECTORY` is set (skipped otherwise; CI sets it in group 8)
-- [ ] 3.3 Add the renewal planner (decision 9): due when a third or less of the lifetime is left, backoff of 1h, 2h, 4h, then 6h, with an injectable clock; verify with unit tests for a 90-day certificate (due at 30 days), a 45-day one, and the backoff sequence
+- [x] 3.3 Add the renewal planner (decision 9): due when a third or less of the lifetime is left, backoff of 1h, 2h, 4h, then 6h, with an injectable clock; verify with unit tests for a 90-day certificate (due at 30 days), a 45-day one, and the backoff sequence
 
 ## 4. Challenges, redirect and TLS in the engine (proxlet-server)
 

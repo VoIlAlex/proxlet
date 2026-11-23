@@ -5,8 +5,10 @@
 //! This crate knows nothing about serving: the server reads the stored PEM
 //! files and builds its own TLS configuration from them.
 
+pub mod acme;
 pub mod name;
 pub mod pem;
+pub mod renew;
 pub mod store;
 
 #[cfg(any(test, feature = "test-support"))]
