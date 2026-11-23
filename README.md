@@ -7,9 +7,9 @@ A tiny, fast reverse proxy and HTTP server written in Rust. One command to route
 a path or a domain to a local port or a folder. It runs on its own, or attaches
 to an nginx that already owns ports 80 and 443.
 
-> **Status: early development.** Rules, proxying, static files, settings and
-> the foreground server work today; the rest of the commands below are being
-> built change by change. See [Roadmap](#roadmap).
+> **Status: early development.** Rules, proxying, static files, settings, the
+> system service and attaching behind nginx work today; the rest of the
+> commands below are being built change by change. See [Roadmap](#roadmap).
 
 ## What it looks like
 
@@ -40,13 +40,14 @@ settings and where proxlet keeps its files.
 
 ## How it works
 
-- **Standalone:** proxlet listens on 80/443 itself.
-- **Attached:** if nginx already holds those ports, proxlet installs a single
-  catch-all in nginx that forwards otherwise-unclaimed traffic to proxlet.
-  Routing, logs and stats stay in proxlet, so rules apply instantly without
-  reloading nginx.
-- If the ports are held by something that is not a supported server, proxlet
-  refuses to start and tells you what is in the way.
+- **Standalone:** proxlet listens on port 80 itself.
+- **Attached:** if nginx holds the port, or starts later, proxlet hands it over
+  and installs a single catch-all in nginx that forwards otherwise-unclaimed
+  traffic to proxlet. When nginx stops, proxlet takes the port back. Routing,
+  logs and stats stay in proxlet, so rules apply instantly without reloading
+  nginx. `sudo proxlet stop` restores nginx's config exactly.
+- If the port is held by something that is not a supported server, proxlet
+  says what is in the way and takes the port as soon as it is free.
 
 ## Install
 
@@ -79,10 +80,10 @@ echo 'source <(COMPLETE=zsh proxlet)' >> ~/.zshrc
 Work is specified with [OpenSpec](https://github.com/Fission-AI/OpenSpec) under
 [`openspec/`](openspec/), one change per slice:
 
-1. **Core** — rules, standalone serving (proxy + static files), `start`/`stop`/`status`, `config` *(in progress)*
-2. **Logs** — structured access and error logs, `proxlet logs`
-3. **nginx attach** — detection, catch-all install, conflict warnings
-4. **Certificates** — Let's Encrypt issuance and renewal, HTTPS
+1. **Core** — rules, standalone serving (proxy + static files), `start`/`stop`/`status`, `config` *(done)*
+2. **nginx attach** — port handoff, catch-all install, conflict warnings *(in progress)*
+3. **Certificates** — Let's Encrypt issuance and renewal, HTTPS
+4. **Logs** — structured access and error logs, `proxlet logs`
 5. **Monitor** — live stats TUI
 6. **AI tools** — MCP server and `proxlet ai`
 
