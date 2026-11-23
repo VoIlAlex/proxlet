@@ -45,8 +45,8 @@
 
 ## 7. End to end and docs
 
-- [ ] 7.1 Change the CI `systemd` job's taken-port step to expect waiting, and the failed-start step to use an invalid config file; verify that the job passes
-- [ ] 7.2 Add a CI job that installs nginx and runs the whole flow: start with a takeover, an unclaimed host through nginx, a claimed host, a WebSocket, `systemctl stop` and `start nginx`, a manual `nginx`, an `add` conflict, and `stop` restoring the config byte-for-byte; verify that the job passes
+- [x] 7.1 Change the CI `systemd` job's taken-port step to expect waiting, and the failed-start step to use an invalid config file; verify that the job passes
+- [x] 7.2 Add a CI job that installs nginx and runs the whole flow: start with a takeover, an unclaimed host through nginx, a claimed host, a WebSocket, `systemctl stop` and `start nginx`, a manual `nginx`, an `add` conflict, and `stop` restoring the config byte-for-byte; verify that the job passes
 - [x] 7.3 Document attach mode in `docs/usage.md` (modes, what proxlet writes, takeover, conflicts, handoff, `attach.*` settings, uninstalling), and update `README.md` and `CHANGELOG.md`
 - [x] 7.4 Record each spec scenario's test in `verification.md`, and run `openspec validate add-nginx-attach --strict`
 

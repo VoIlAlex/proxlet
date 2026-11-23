@@ -70,7 +70,14 @@ On macOS, `cargo test --workspace` passes all 222 tests, and
 | Duration value | `cli::proxy_timeout_setting_bounds_upstream_wait`, `cli::config_duration_value` |
 | Attach port needs a restart | `cli::attach_port_needs_a_restart` |
 
-## Not yet verified
+## CI
 
-- The CI jobs `systemd` (changed) and `nginx` (new) have not run yet. They run
-  on the first push of this change.
+Both end-to-end jobs pass on PR #5 (run 45286547110): `systemd` with all
+three steps, and `nginx` with all six (attach, WebSocket, service stop and
+start, nginx started by hand, add conflict, exact restore).
+
+Two fixes to the jobs themselves were needed along the way: the runner image
+ships nginx with its service disabled, so the job now runs
+`systemctl enable --now nginx`; and the check that `default_server` left
+Debian's default site ignores the commented-out `# listen 443 ssl
+default_server;` lines in it.
