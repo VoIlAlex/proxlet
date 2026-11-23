@@ -91,13 +91,12 @@ mod linux {
                 continue;
             };
             for fd in fds.flatten() {
-                if let Ok(link) = fs::read_link(fd.path()) {
-                    if wanted.iter().any(|w| link.as_os_str() == w.as_str()) {
-                        let name = fs::read_to_string(entry.path().join("comm"))
-                            .map(|s| s.trim().to_owned())
-                            .unwrap_or_else(|_| "unknown".into());
-                        return Some(Holder { pid, name });
-                    }
+                if let Ok(link) = fs::read_link(fd.path())
+                    && wanted.iter().any(|w| link.as_os_str() == w.as_str())
+                {
+                    let name = fs::read_to_string(entry.path().join("comm"))
+                        .map_or_else(|_| "unknown".into(), |s| s.trim().to_owned());
+                    return Some(Holder { pid, name });
                 }
             }
         }

@@ -92,8 +92,8 @@ fmt --check` are clean.
 | Complete a key | `cli::completion_offers_rules_keys_and_values` |
 | Complete a value | `cli::completion_offers_rules_keys_and_values`; `proxlet/src/complete.rs` tests |
 
-## Not yet verified
+## Real systemd
 
-- The CI job `systemd` has not run yet. It runs on the first push that includes
-  this change. Until then, real-systemd behaviour is covered only through the
-  fake manager and the `systemctl` invocation tests.
+The CI job `systemd` passed on PR #3 (run 45151497596) on GitHub's Ubuntu
+runner. It covers `sudo proxlet start`, the service user, live `add`, serving,
+`stop`, a repeated `start` and `stop`, and a start on a taken port 80.

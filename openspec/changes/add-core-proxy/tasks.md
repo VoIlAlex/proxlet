@@ -44,7 +44,7 @@
 
 ## 6. End-to-end verification
 
-- [ ] 6.1 Add a CI job that runs the systemd flow in a systemd-enabled container: `start`, `add`, request, `stop`; verify the job passes
+- [x] 6.1 Add a CI job that runs the systemd flow in a systemd-enabled container: `start`, `add`, request, `stop`; verify the job passes
 - [x] 6.2 Run a load test (for example `oha`) through a proxy rule and a files rule and record throughput and p99 against a direct-to-upstream baseline in `docs/`; verify no errors under load and note the overhead
 - [x] 6.3 Run `openspec validate add-core-proxy --strict` and confirm every scenario in `specs/` maps to a passing test (mapping in `verification.md`)
 
