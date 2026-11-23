@@ -16,6 +16,8 @@ pub struct Home {
     pub port: u16,
     /// The internal (attach) listener's port.
     pub internal_port: u16,
+    /// A fake `nginx` script, if this home has one.
+    pub nginx: Option<PathBuf>,
 }
 
 pub struct Run {
@@ -62,6 +64,7 @@ impl Home {
             dir,
             port: free_port(),
             internal_port: free_port(),
+            nginx: None,
         };
         home.run(&["config", "listen.address", "127.0.0.1"]).ok();
         home.run(&["config", "listen.http_port", &home.port.to_string()])
@@ -84,8 +87,19 @@ impl Home {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(BIN);
+        self.command_as(Path::new(BIN), args)
+    }
+
+    /// Runs a copy of the binary (e.g. one named `nginx`).
+    pub fn command_as(&self, bin: &Path, args: &[&str]) -> Command {
+        let mut c = Command::new(bin);
+        // Never touch a real nginx on the machine running the tests.
+        let nginx = self
+            .nginx
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/nonexistent/nginx"));
         c.args(args)
+            .env("PROXLET_NGINX", nginx)
             .env("PROXLET_HOME", self.path())
             .env("NO_COLOR", "1")
             .env_remove("COMPLETE")
@@ -99,8 +113,13 @@ impl Home {
 
     /// Starts `proxlet run` and waits until it answers `status`.
     pub fn start(&self) -> Daemon {
+        self.start_as(Path::new(BIN))
+    }
+
+    /// Like [`Home::start`], running `bin` instead of the proxlet binary.
+    pub fn start_as(&self, bin: &Path) -> Daemon {
         let child = self
-            .command(&["run"])
+            .command_as(bin, &["run"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -183,6 +202,99 @@ impl Home {
             .map(|l| l.split(':').next().unwrap_or("").to_owned())
             .filter(|v| !v.starts_with("--"))
             .collect()
+    }
+}
+
+impl Home {
+    /// A home with a fake nginx: a config tree under `nginx/` and a script
+    /// that answers `-V`, `-t` (failing on the word `bogus`) and `-s reload`.
+    /// `site.example` is served on this home's HTTP port; with `default`,
+    /// another server is marked `default_server` for it.
+    pub fn with_nginx(default: bool) -> Self {
+        let mut home = Self::new();
+        let root = home.path().join("nginx");
+        std::fs::create_dir_all(root.join("conf.d")).unwrap();
+        std::fs::create_dir_all(root.join("sites-enabled")).unwrap();
+        std::fs::write(
+            root.join("nginx.conf"),
+            format!(
+                "events {{}}\nhttp {{\n    include {0}/conf.d/*.conf;\n    include {0}/sites-enabled/*;\n}}\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sites-enabled/site"),
+            format!(
+                "server {{\n    listen {};\n    server_name site.example;\n}}\n",
+                home.port
+            ),
+        )
+        .unwrap();
+        if default {
+            std::fs::write(
+                root.join("sites-enabled/default"),
+                format!(
+                    "server {{\n    listen {} default_server;\n    server_name _;\n}}\n",
+                    home.port
+                ),
+            )
+            .unwrap();
+        }
+        let script = root.join("nginx");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 ROOT='{0}'\n\
+                 case \"$1\" in\n\
+                 -V) echo 'nginx version: nginx/1.24.0' >&2\n\
+                 \x20   echo \"configure arguments: --prefix=$ROOT --conf-path=$ROOT/nginx.conf --error-log-path=$ROOT/error.log\" >&2 ;;\n\
+                 -t) if grep -rqs bogus \"$ROOT/conf.d\" \"$ROOT/sites-enabled\"; then\n\
+                 \x20     echo 'nginx: [emerg] unknown directive \"bogus\"' >&2; exit 1\n\
+                 \x20   fi ;;\n\
+                 esac\n\
+                 exit 0\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        home.nginx = Some(script);
+        home
+    }
+
+    /// Every file under the fake nginx tree (except the script), with contents.
+    pub fn nginx_tree(&self) -> Vec<(PathBuf, String)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.file_name().is_some_and(|n| n != "nginx") {
+                    out.push((p.clone(), std::fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.path().join("nginx"), &mut out);
+        out.sort();
+        out
+    }
+
+    /// A copy of the proxlet binary whose process is named `nginx`.
+    pub fn binary_named_nginx(&self) -> PathBuf {
+        let dir = self.path().join("fake-bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nginx");
+        if std::fs::hard_link(BIN, &path).is_err() {
+            std::fs::copy(BIN, &path).unwrap();
+        }
+        path
     }
 }
 

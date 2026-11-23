@@ -13,6 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::attach;
 use crate::control::{self, Reply, Request, StatusInfo, WireOutcome};
 use crate::output::{CmdResult, Failure};
 use crate::pipeline;
@@ -59,6 +60,10 @@ async fn run_async(locations: &Locations) -> CmdResult {
     let internal = SocketAddr::from(([127, 0, 0, 1], settings.attach_port));
 
     let internal_listener = bind_internal(internal)?;
+    let foreground = std::env::var_os(SERVICE_ENV).is_none();
+    let front = attach::system_front();
+    let ledger = locations.state_dir.join(attach::LEDGER);
+    let attached_here = foreground && attach_in_foreground(&*front, &ledger, settings);
     let first = bind_public(listen)?;
     let control_listener = bind_control(locations)?;
 
@@ -128,6 +133,9 @@ async fn run_async(locations: &Locations) -> CmdResult {
     let _ = internal_task.await;
     let _ = owner_task.await;
     conns.drain(GRACE).await;
+    if attached_here {
+        detach_in_foreground(&*front, &ledger);
+    }
     let _ = std::fs::remove_file(&socket);
     tracing::info!("stopped");
     Ok(())
@@ -135,6 +143,89 @@ async fn run_async(locations: &Locations) -> CmdResult {
 
 async fn stopped(mut rx: watch::Receiver<bool>) {
     let _ = rx.wait_for(|stop| *stop).await;
+}
+
+fn foreground_attach<'a>(
+    front: &'a dyn FrontServer,
+    ledger: &Path,
+    confirm: &'a dyn Fn(&str) -> Option<bool>,
+) -> attach::Attach<'a> {
+    attach::Attach {
+        front,
+        manager: None,
+        ledger: ledger.to_owned(),
+        owner: None,
+        hook: None,
+        yes: false,
+        confirm,
+    }
+}
+
+/// `proxlet run` sets up the attach itself only when it may write the front
+/// server's config (e.g. Homebrew's, owned by the user). Returns whether it did.
+fn attach_in_foreground(
+    front: &dyn FrontServer,
+    ledger: &Path,
+    settings: &proxlet_core::Settings,
+) -> bool {
+    if !settings.attach_enabled {
+        return false;
+    }
+    let Some(inst) = front.detect() else {
+        return false;
+    };
+    let writable = front.read(&inst).is_ok_and(|cfg| {
+        cfg.http_includes
+            .first()
+            .is_some_and(|d| nix::unistd::access(&d.dir, nix::unistd::AccessFlags::W_OK).is_ok())
+    });
+    if !writable {
+        return false;
+    }
+    let confirm = crate::output::confirm;
+    match foreground_attach(front, ledger, &confirm).attach(settings) {
+        Ok(a) => {
+            match &a.outcome {
+                attach::Outcome::Attached { wrote, .. } => tracing::info!(
+                    "attached to {}{}",
+                    a.front,
+                    wrote
+                        .as_ref()
+                        .map(|w| format!(" ({})", w.display()))
+                        .unwrap_or_default()
+                ),
+                attach::Outcome::Declined { default_at } => tracing::warn!(
+                    "{} keeps its own default server at {default_at}; requests for hosts it does not serve go there",
+                    a.front
+                ),
+                _ => {}
+            }
+            matches!(
+                a.outcome,
+                attach::Outcome::Attached { .. }
+                    | attach::Outcome::AlreadyAttached
+                    | attach::Outcome::Declined { .. }
+            )
+        }
+        Err(e) => {
+            tracing::warn!("could not attach to {}: {}", front.name(), e.message);
+            false
+        }
+    }
+}
+
+fn detach_in_foreground(front: &dyn FrontServer, ledger: &Path) {
+    let confirm = |_: &str| None;
+    match foreground_attach(front, ledger, &confirm).detach() {
+        Ok(Some(warnings)) => {
+            for w in warnings {
+                tracing::warn!("{w}");
+            }
+            tracing::info!("detached from {}", front.name());
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("could not detach from {}: {}", front.name(), e.message),
+    }
 }
 
 /// Recognises the process holding the public port (design decision 6).

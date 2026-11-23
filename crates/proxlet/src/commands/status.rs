@@ -1,9 +1,10 @@
 //! `proxlet status`.
 
-use proxlet_core::Locations;
+use proxlet_core::{ConfigFile, Locations};
 
+use crate::attach;
 use crate::control;
-use crate::output::{BOLD, CmdResult, DIM, Failure, OK};
+use crate::output::{self, BOLD, CmdResult, DIM, Failure, OK};
 
 /// Exit code when proxlet is not running (as in LSB `status`).
 pub const NOT_RUNNING: u8 = 3;
@@ -33,7 +34,24 @@ pub fn run(locations: &Locations) -> CmdResult {
     for (k, v) in rows {
         anstream::println!("  {DIM}{k:<8}{DIM:#}{v}");
     }
+    if let Some(front) = s
+        .mode
+        .strip_prefix("attached (")
+        .and_then(|m| m.strip_suffix(')'))
+        && !front_forwards(locations)
+    {
+        output::warn(format!("{front} is not forwarding to proxlet yet"));
+        output::note("Set it up with: sudo proxlet start");
+    }
     Ok(())
+}
+
+/// Whether the front server's config has proxlet's block. Unknown counts as yes.
+fn front_forwards(locations: &Locations) -> bool {
+    let Ok((_, config)) = ConfigFile::new(locations.config_file()).read() else {
+        return true;
+    };
+    attach::front_config(&config.settings).is_none_or(|(_, cfg)| cfg.has_managed_block())
 }
 
 /// Where requests reach proxlet, given its mode.

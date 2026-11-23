@@ -167,7 +167,7 @@ fn ls_plain_output_and_empty_case() {
     assert_eq!(
         home.run(&["ls"]).ok().stdout,
         format!(
-            "/api\tproxy\thttp://127.0.0.1:8000\n/files\tfiles\t{}\nexample.com/api\tproxy\thttp://127.0.0.1:8002\n",
+            "/api\tproxy\thttp://127.0.0.1:8000\t\n/files\tfiles\t{}\t\nexample.com/api\tproxy\thttp://127.0.0.1:8002\t\n",
             site.display()
         )
     );

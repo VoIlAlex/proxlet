@@ -30,13 +30,13 @@
 
 ## 5. CLI: start, stop, add, ls, status (proxlet)
 
-- [ ] 5.1 Make `sudo proxlet start [--yes]` set up the attach when nginx is detected and `attach.enabled` is on: plan, prompt for the default-server takeover, apply, hook the unit, add the log group, and be idempotent when already running; verify with fake-manager and fake-front tests for "Take over with confirmation", "Take over without a prompt", "Declined", "nginx rejects the change" and "Setting up the attach"
-- [ ] 5.2 Make `sudo proxlet stop` detach (unhook, undo the ledger, reload) before stopping the service; verify with fake tests for "Stop while attached"
-- [ ] 5.3 Make `proxlet run` set up the attach only when the nginx config directory is writable; verify with a test using a writable fixture config
-- [ ] 5.4 Add the conflict check and prompt to `proxlet add [--yes]`; verify with CLI tests against a fixture nginx config for "Conflict confirmed", "Conflict without a terminal" and "Conflict declined"
-- [ ] 5.5 Add the fourth `ls` field, "served by nginx (file:line)", in both table and plain output; verify with a CLI test for "Rule shadowed by nginx"
-- [ ] 5.6 Show `attached (nginx)`, the `behind nginx` listen line and the "not forwarding yet" hint in `proxlet status`; verify with CLI tests for "Running behind nginx" and "nginx installed later"
-- [ ] 5.7 Make `attach.enabled off` skip all nginx reading, writing and hooks; verify with a CLI test for "Attach disabled"
+- [x] 5.1 Make `sudo proxlet start [--yes]` set up the attach when nginx is detected and `attach.enabled` is on: plan, prompt for the default-server takeover, apply, hook the unit, add the log group, and be idempotent when already running; verify with fake-manager and fake-front tests for "Take over with confirmation", "Take over without a prompt", "Declined", "nginx rejects the change" and "Setting up the attach"
+- [x] 5.2 Make `sudo proxlet stop` detach (unhook, undo the ledger, reload) before stopping the service; verify with fake tests for "Stop while attached"
+- [x] 5.3 Make `proxlet run` set up the attach only when the nginx config directory is writable; verify with a test using a writable fixture config
+- [x] 5.4 Add the conflict check and prompt to `proxlet add [--yes]`; verify with CLI tests against a fixture nginx config for "Conflict confirmed", "Conflict without a terminal" and "Conflict declined"
+- [x] 5.5 Add the fourth `ls` field, "served by nginx (file:line)", in both table and plain output; verify with a CLI test for "Rule shadowed by nginx"
+- [x] 5.6 Show `attached (nginx)`, the `behind nginx` listen line and the "not forwarding yet" hint in `proxlet status`; verify with CLI tests for "Running behind nginx" and "nginx installed later"
+- [x] 5.7 Make `attach.enabled off` skip all nginx reading, writing and hooks; verify with a CLI test for "Attach disabled"
 
 ## 6. Watching nginx (proxlet)
 

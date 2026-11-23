@@ -7,12 +7,18 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use proxlet_core::Locations;
-use proxlet_service::{RunAs, SUPPORTED, ServiceManager, ServiceSpec, ServiceState};
+use proxlet_core::{ConfigFile, Locations};
+use proxlet_front::FrontServer;
+use proxlet_service::{RunAs, SUPPORTED, ServiceManager, ServiceSpec, ServiceState, UnitHook};
+
+use crate::attach::{self, Attach, Attached, Outcome};
 
 use crate::control::{self, Client, Request, StatusInfo};
 use crate::daemon::SERVICE_ENV;
 use crate::output::{self, CmdResult, Failure};
+
+/// Asks a yes/no question; `None` when there is no terminal to ask on.
+pub type Confirm = dyn Fn(&str) -> Option<bool>;
 
 /// The host as `start`/`stop` see it.
 pub struct Host {
@@ -32,6 +38,10 @@ pub struct Host {
     pub timeout: Duration,
     /// How often to check while waiting.
     pub poll: Duration,
+    /// The front server to attach behind, if attach is possible here.
+    pub front: Option<Box<dyn FrontServer>>,
+    /// Asks a yes/no question; `None` when there is no terminal.
+    pub confirm: Box<Confirm>,
 }
 
 impl Host {
@@ -56,7 +66,35 @@ impl Host {
             }),
             timeout: Duration::from_secs(10),
             poll: Duration::from_millis(200),
+            front: Some(attach::system_front()),
+            confirm: Box::new(output::confirm),
         }
+    }
+
+    /// Attach and detach for this host, if it has a front server.
+    fn attach(&self, locations: &Locations, yes: bool) -> Option<Attach<'_>> {
+        let front = self.front.as_deref()?;
+        let argv = |action: &str| -> Vec<String> {
+            vec![
+                self.exe.display().to_string(),
+                "handoff".into(),
+                action.into(),
+                "--socket".into(),
+                locations.socket().display().to_string(),
+            ]
+        };
+        Some(Attach {
+            front,
+            manager: self.manager.as_deref(),
+            ledger: locations.state_dir.join(attach::LEDGER),
+            owner: self.invoking_user.as_ref().and_then(owner_ids),
+            hook: Some(UnitHook {
+                before_start: argv("release"),
+                after_stop: argv("reclaim"),
+            }),
+            yes,
+            confirm: &*self.confirm,
+        })
     }
 
     fn wait_for(&self, mut done: impl FnMut() -> Option<Result<(), Failure>>) -> Option<CmdResult> {
@@ -70,6 +108,42 @@ impl Host {
             }
             std::thread::sleep(self.poll);
         }
+    }
+}
+
+/// The numeric ids of a service user.
+fn owner_ids(run_as: &RunAs) -> Option<(u32, u32)> {
+    let user = nix::unistd::User::from_name(&run_as.user).ok().flatten()?;
+    Some((user.uid.as_raw(), user.gid.as_raw()))
+}
+
+/// Prints what attaching did.
+fn report_attach(a: &Attached) {
+    match &a.outcome {
+        Outcome::Attached {
+            wrote,
+            moved_default,
+        } => {
+            output::success(format!(
+                "Attached to {}: requests for hosts it does not serve now reach proxlet",
+                a.front
+            ));
+            if let Some(path) = wrote {
+                output::note(format!("Added {}", path.display()));
+            }
+            for at in moved_default {
+                output::note(format!("Moved default_server from {at} to proxlet's block"));
+            }
+        }
+        Outcome::Declined { default_at } => {
+            output::warn(format!(
+                "{} keeps its own default server at {default_at}; requests for hosts it does not \
+                 serve go there, not to proxlet",
+                a.front
+            ));
+            output::note("To make proxlet the default instead: sudo proxlet start --yes");
+        }
+        Outcome::AlreadyAttached | Outcome::Disabled | Outcome::NoFront => {}
     }
 }
 
@@ -101,8 +175,8 @@ fn describe(s: &StatusInfo) -> String {
 }
 
 /// `proxlet start` on the real host.
-pub fn start(locations: &Locations) -> CmdResult {
-    start_with(&Host::system(locations), locations)
+pub fn start(locations: &Locations, yes: bool) -> CmdResult {
+    start_with(&Host::system(locations), locations, yes)
 }
 
 /// `proxlet stop` on the real host.
@@ -110,17 +184,60 @@ pub fn stop(locations: &Locations) -> CmdResult {
     stop_with(&Host::system(locations), locations)
 }
 
-/// Installs the service, starts it, and waits until it serves.
-pub fn start_with(host: &Host, locations: &Locations) -> CmdResult {
-    if let Some(s) = (host.probe)() {
+/// Installs the service, attaches behind a front server if there is one,
+/// starts the service, and waits until it serves.
+pub fn start_with(host: &Host, locations: &Locations, yes: bool) -> CmdResult {
+    let running = (host.probe)();
+    if let Some(s) = &running
+        && !host.is_root
+    {
+        output::success(format!("proxlet is already running ({})", describe(s)));
+        return Ok(());
+    }
+    if running.is_none() {
+        host.manager.as_deref().ok_or_else(no_manager)?;
+        if !host.is_root {
+            return Err(Failure::new("installing the system service needs root")
+                .hint("Run: sudo proxlet start"));
+        }
+    }
+
+    let (_, config) = ConfigFile::new(locations.config_file()).read()?;
+    let attach = host.attach(locations, yes);
+    let attached = match &attach {
+        Some(a) => Some(a.attach(&config.settings)?),
+        None => None,
+    };
+    if let Some(a) = &attached {
+        report_attach(a);
+    }
+    if let Some(s) = running {
         output::success(format!("proxlet is already running ({})", describe(&s)));
         return Ok(());
     }
     let manager = host.manager.as_deref().ok_or_else(no_manager)?;
-    if !host.is_root {
-        return Err(Failure::new("installing the system service needs root")
-            .hint("Run: sudo proxlet start"));
+    let supplementary_groups = attached
+        .as_ref()
+        .and_then(|a| a.error_log.as_deref())
+        .and_then(attach::log_group)
+        .into_iter()
+        .collect();
+    let result = install_and_wait(host, locations, manager, supplementary_groups);
+    if result.is_err()
+        && let Some(a) = &attach
+    {
+        // Don't leave the front server forwarding to a server that is not there.
+        let _ = a.detach();
     }
+    result
+}
+
+fn install_and_wait(
+    host: &Host,
+    locations: &Locations,
+    manager: &dyn ServiceManager,
+    supplementary_groups: Vec<String>,
+) -> CmdResult {
     if host.invoking_user.is_none() {
         output::warn(
             "No sudo user found; the service will run as root and use system directories.",
@@ -143,7 +260,7 @@ pub fn start_with(host: &Host, locations: &Locations) -> CmdResult {
             ),
         ],
         bind_privileged_ports: host.invoking_user.is_some(),
-        supplementary_groups: Vec::new(),
+        supplementary_groups,
     };
     let service_error = |e: proxlet_service::ServiceError| Failure::new(e.to_string());
     manager.install(&spec).map_err(service_error)?;
@@ -238,8 +355,26 @@ fn log_hint(manager: &dyn ServiceManager) -> &'static str {
     }
 }
 
-/// Stops the service (or a foreground daemon) and keeps rules and settings.
-pub fn stop_with(host: &Host, _locations: &Locations) -> CmdResult {
+/// Stops the service (or a foreground daemon), detaches from the front
+/// server, and keeps rules and settings.
+pub fn stop_with(host: &Host, locations: &Locations) -> CmdResult {
+    stop_server(host)?;
+    let Some(attach) = host.attach(locations, false) else {
+        return Ok(());
+    };
+    if let Some(warnings) = attach.detach()? {
+        for w in warnings {
+            output::warn(w);
+        }
+        output::success(format!(
+            "Detached from {}: its config is as it was before proxlet",
+            attach.front.name()
+        ));
+    }
+    Ok(())
+}
+
+fn stop_server(host: &Host) -> CmdResult {
     let state = match host.manager.as_deref() {
         Some(m) => Some(m.state().map_err(|e| Failure::new(e.to_string()))?),
         None => None,
@@ -323,16 +458,16 @@ mod tests {
     use std::rc::Rc;
 
     #[derive(Default)]
-    struct FakeState {
-        calls: RefCell<Vec<String>>,
-        state: Cell<Option<ServiceState>>,
-        installed: RefCell<Option<ServiceSpec>>,
-        logs: RefCell<Vec<String>>,
-        running: Cell<bool>,
+    pub(super) struct FakeState {
+        pub(super) calls: RefCell<Vec<String>>,
+        pub(super) state: Cell<Option<ServiceState>>,
+        pub(super) installed: RefCell<Option<ServiceSpec>>,
+        pub(super) logs: RefCell<Vec<String>>,
+        pub(super) running: Cell<bool>,
         /// What the daemon does once started: come up, or crash.
-        comes_up: Cell<bool>,
+        pub(super) comes_up: Cell<bool>,
         /// The mode the daemon reports, if not `standalone`.
-        mode: RefCell<Option<String>>,
+        pub(super) mode: RefCell<Option<String>>,
     }
 
     struct FakeManager(Rc<FakeState>);
@@ -394,7 +529,7 @@ mod tests {
         }
     }
 
-    fn host(fake: &Rc<FakeState>, is_root: bool, with_manager: bool) -> Host {
+    pub(super) fn host(fake: &Rc<FakeState>, is_root: bool, with_manager: bool) -> Host {
         let probe_state = fake.clone();
         let stop_state = fake.clone();
         Host {
@@ -422,6 +557,8 @@ mod tests {
             }),
             timeout: Duration::from_millis(300),
             poll: Duration::from_millis(10),
+            front: None,
+            confirm: Box::new(|_| panic!("unexpected prompt")),
         }
     }
 
@@ -434,7 +571,7 @@ mod tests {
         let fake = Rc::new(FakeState::default());
         fake.comes_up.set(true);
         *fake.mode.borrow_mut() = Some("waiting for port 80 (held by caddy)".into());
-        start_with(&host(&fake, true, true), &locations()).unwrap();
+        start_with(&host(&fake, true, true), &locations(), false).unwrap();
         assert_eq!(*fake.calls.borrow(), ["install", "start"]);
     }
 
@@ -443,7 +580,7 @@ mod tests {
         let fake = Rc::new(FakeState::default());
         fake.comes_up.set(true);
         *fake.mode.borrow_mut() = Some(format!("waiting for port 80 ({})", crate::ports::CHECKING));
-        let err = start_with(&host(&fake, true, true), &locations()).unwrap_err();
+        let err = start_with(&host(&fake, true, true), &locations(), false).unwrap_err();
         assert!(
             err.message.contains("did not start serving"),
             "{}",
@@ -455,7 +592,7 @@ mod tests {
     fn first_start_installs_runs_as_invoking_user_and_waits() {
         let fake = Rc::new(FakeState::default());
         fake.comes_up.set(true);
-        start_with(&host(&fake, true, true), &locations()).unwrap();
+        start_with(&host(&fake, true, true), &locations(), false).unwrap();
         assert_eq!(*fake.calls.borrow(), ["install", "start"]);
         let spec = fake.installed.borrow().clone().unwrap();
         assert_eq!(spec.args, ["run"]);
@@ -479,7 +616,7 @@ mod tests {
     fn start_when_already_running_changes_nothing() {
         let fake = Rc::new(FakeState::default());
         fake.running.set(true);
-        start_with(&host(&fake, true, true), &locations()).unwrap();
+        start_with(&host(&fake, true, true), &locations(), false).unwrap();
         assert!(fake.calls.borrow().is_empty());
     }
 
@@ -492,7 +629,7 @@ mod tests {
             "  Stop whatever holds it, or move proxlet: proxlet config listen.http_port 8080"
                 .into(),
         ];
-        let err = start_with(&host(&fake, true, true), &locations()).unwrap_err();
+        let err = start_with(&host(&fake, true, true), &locations(), false).unwrap_err();
         assert_eq!(
             err.message,
             "proxlet failed to start: port 80 is already in use by apache2 (pid 9)"
@@ -511,7 +648,7 @@ mod tests {
     #[test]
     fn start_without_a_service_manager_points_to_run() {
         let fake = Rc::new(FakeState::default());
-        let err = start_with(&host(&fake, true, false), &locations()).unwrap_err();
+        let err = start_with(&host(&fake, true, false), &locations(), false).unwrap_err();
         assert!(err.message.contains("no supported service manager"));
         assert!(err.hints.iter().any(|h| h.contains("systemd")));
         assert!(err.hints.iter().any(|h| h.contains("proxlet run")));
@@ -520,7 +657,7 @@ mod tests {
     #[test]
     fn start_without_root_asks_for_sudo() {
         let fake = Rc::new(FakeState::default());
-        let err = start_with(&host(&fake, false, true), &locations()).unwrap_err();
+        let err = start_with(&host(&fake, false, true), &locations(), false).unwrap_err();
         assert!(err.hints.iter().any(|h| h.contains("sudo proxlet start")));
         assert!(fake.calls.borrow().is_empty());
     }
@@ -568,5 +705,279 @@ mod tests {
         let err = stop_with(&host(&fake, false, false), &locations()).unwrap_err();
         assert!(err.hints.iter().any(|h| h.contains("systemd")));
         assert!(err.hints.iter().any(|h| h.contains("proxlet run")));
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    //! `start` and `stop` with nginx installed: a real nginx config tree in a
+    //! temporary directory, read and planned by the real code, with nginx's
+    //! commands answered by a fake runner.
+
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::rc::Rc;
+
+    use super::tests::{FakeState, host};
+    use super::*;
+    use proxlet_core::command::{CommandOutput, CommandRunner};
+    use proxlet_front::Nginx;
+
+    /// Answers `nginx -V`, `-t` (fails if any file under the tree contains
+    /// `bogus`) and `-s reload`; nginx is never running.
+    struct FakeNginx {
+        root: PathBuf,
+    }
+
+    fn contains_bogus(dir: &Path) -> bool {
+        fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                contains_bogus(&p)
+            } else {
+                fs::read_to_string(&p).is_ok_and(|t| t.contains("bogus"))
+            }
+        })
+    }
+
+    impl CommandRunner for FakeNginx {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            let ok = |stderr: String| CommandOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr,
+            };
+            match (program, args.first().copied()) {
+                ("nginx", Some("-V")) => Ok(ok(format!(
+                    "nginx version: nginx/1.24.0\nconfigure arguments: --prefix={0} --conf-path={0}/nginx.conf\n",
+                    self.root.display()
+                ))),
+                ("nginx", Some("-t")) if contains_bogus(&self.root) => Ok(CommandOutput {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "nginx: [emerg] unknown directive \"bogus\"\n".into(),
+                }),
+                ("nginx", _) => Ok(ok(String::new())),
+                _ => Ok(CommandOutput {
+                    code: 1,
+                    ..CommandOutput::default()
+                }),
+            }
+        }
+    }
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let f = Self {
+                dir: tempfile::tempdir().unwrap(),
+            };
+            let n = f.nginx_root();
+            fs::create_dir_all(n.join("conf.d")).unwrap();
+            fs::create_dir_all(n.join("sites-enabled")).unwrap();
+            fs::write(
+                n.join("nginx.conf"),
+                format!(
+                    "events {{}}\nhttp {{\n    include {0}/conf.d/*.conf;\n    include {0}/sites-enabled/*;\n}}\n",
+                    n.display()
+                ),
+            )
+            .unwrap();
+            fs::write(
+                n.join("sites-enabled/default"),
+                "server {\n    listen 80 default_server;\n    server_name _;\n}\n",
+            )
+            .unwrap();
+            f
+        }
+
+        fn nginx_root(&self) -> PathBuf {
+            self.dir.path().join("nginx")
+        }
+
+        fn locations(&self) -> Locations {
+            Locations::for_user_home(&self.dir.path().join("home"))
+        }
+
+        /// Every file under the nginx tree with its contents.
+        fn snapshot(&self) -> Vec<(PathBuf, String)> {
+            fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+                for e in fs::read_dir(dir).unwrap().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, out);
+                    } else {
+                        out.push((p.clone(), fs::read_to_string(&p).unwrap()));
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&self.nginx_root(), &mut out);
+            out.sort();
+            out
+        }
+
+        fn host(
+            &self,
+            fake: &Rc<FakeState>,
+            answer: Option<bool>,
+        ) -> (Host, Rc<RefCell<Vec<String>>>) {
+            let mut h = host(fake, true, true);
+            h.front = Some(Box::new(Nginx::with_candidates(
+                FakeNginx {
+                    root: self.nginx_root(),
+                },
+                &["nginx"],
+            )));
+            let asked = Rc::new(RefCell::new(Vec::new()));
+            let log = asked.clone();
+            h.confirm = Box::new(move |q| {
+                log.borrow_mut().push(q.to_owned());
+                answer
+            });
+            (h, asked)
+        }
+    }
+
+    fn started() -> Rc<FakeState> {
+        let fake = Rc::new(FakeState::default());
+        fake.comes_up.set(true);
+        fake
+    }
+
+    #[test]
+    fn take_over_with_confirmation_then_stop_restores_everything() {
+        let f = Fixture::new();
+        let before = f.snapshot();
+        let fake = started();
+        let (h, asked) = f.host(&fake, Some(true));
+        start_with(&h, &f.locations(), false).unwrap();
+
+        assert_eq!(asked.borrow().len(), 1);
+        assert!(
+            asked.borrow()[0].contains("sites-enabled/default:2"),
+            "{:?}",
+            asked.borrow()
+        );
+        assert_eq!(
+            fs::read_to_string(f.nginx_root().join("sites-enabled/default")).unwrap(),
+            "server {\n    listen 80;\n    server_name _;\n}\n"
+        );
+        let block = fs::read_to_string(f.nginx_root().join("conf.d/proxlet.conf")).unwrap();
+        assert!(block.contains("listen 80 default_server;"), "{block}");
+        assert!(
+            block.contains("proxy_pass http://127.0.0.1:47080;"),
+            "{block}"
+        );
+        assert_eq!(
+            *fake.calls.borrow(),
+            ["hook nginx.service", "install", "start"]
+        );
+        let spec = fake.installed.borrow().clone().unwrap();
+        assert_eq!(spec.supplementary_groups, Vec::<String>::new());
+
+        stop_with(&h, &f.locations()).unwrap();
+        assert_eq!(f.snapshot(), before);
+        assert!(
+            fake.calls
+                .borrow()
+                .contains(&"unhook nginx.service".to_owned())
+        );
+        assert!(!f.locations().state_dir.join(attach::LEDGER).exists());
+    }
+
+    #[test]
+    fn take_over_without_a_prompt() {
+        let f = Fixture::new();
+        let fake = started();
+        let (h, asked) = f.host(&fake, None);
+        start_with(&h, &f.locations(), true).unwrap();
+        assert!(asked.borrow().is_empty());
+        assert!(f.nginx_root().join("conf.d/proxlet.conf").exists());
+    }
+
+    #[test]
+    fn declined_or_no_terminal_leaves_nginx_config_unchanged() {
+        for answer in [Some(false), None] {
+            let f = Fixture::new();
+            let before = f.snapshot();
+            let fake = started();
+            let (h, _) = f.host(&fake, answer);
+            start_with(&h, &f.locations(), false).unwrap();
+            assert_eq!(f.snapshot(), before, "answer {answer:?}");
+            // The hook is still installed, so handing the port over works.
+            assert_eq!(
+                *fake.calls.borrow(),
+                ["hook nginx.service", "install", "start"]
+            );
+        }
+    }
+
+    #[test]
+    fn nginx_rejecting_the_change_leaves_everything_as_it_was() {
+        let f = Fixture::new();
+        fs::write(f.nginx_root().join("conf.d/broken.conf"), "bogus;\n").unwrap();
+        let before = f.snapshot();
+        let fake = started();
+        let (h, _) = f.host(&fake, Some(true));
+        let err = start_with(&h, &f.locations(), false).unwrap_err();
+        assert!(err.message.contains("nginx rejected"), "{}", err.message);
+        assert!(
+            err.hints
+                .iter()
+                .any(|h| h.contains("unknown directive \"bogus\"")),
+            "{:?}",
+            err.hints
+        );
+        assert_eq!(f.snapshot(), before);
+        assert!(fake.calls.borrow().is_empty(), "{:?}", fake.calls.borrow());
+        assert!(!f.locations().state_dir.join(attach::LEDGER).exists());
+    }
+
+    #[test]
+    fn setting_up_the_attach_while_already_running() {
+        let f = Fixture::new();
+        let fake = started();
+        fake.running.set(true);
+        let (h, _) = f.host(&fake, Some(true));
+        start_with(&h, &f.locations(), false).unwrap();
+        assert!(f.nginx_root().join("conf.d/proxlet.conf").exists());
+        // Nothing is reinstalled or restarted.
+        assert_eq!(*fake.calls.borrow(), ["hook nginx.service"]);
+        // Running it again changes nothing.
+        start_with(&h, &f.locations(), false).unwrap();
+        assert_eq!(
+            *fake.calls.borrow(),
+            ["hook nginx.service", "hook nginx.service"]
+        );
+    }
+
+    #[test]
+    fn attach_disabled_touches_nothing() {
+        let f = Fixture::new();
+        let before = f.snapshot();
+        let loc = f.locations();
+        fs::create_dir_all(&loc.config_dir).unwrap();
+        fs::write(loc.config_file(), "[attach]\nenabled = false\n").unwrap();
+        let fake = started();
+        let (h, _) = f.host(&fake, Some(true));
+        start_with(&h, &loc, false).unwrap();
+        assert_eq!(f.snapshot(), before);
+        assert_eq!(*fake.calls.borrow(), ["install", "start"]);
+    }
+
+    #[test]
+    fn a_failed_start_detaches_again() {
+        let f = Fixture::new();
+        let before = f.snapshot();
+        let fake = Rc::new(FakeState::default());
+        fake.comes_up.set(false);
+        let (h, _) = f.host(&fake, Some(true));
+        assert!(start_with(&h, &f.locations(), false).is_err());
+        assert_eq!(f.snapshot(), before);
     }
 }

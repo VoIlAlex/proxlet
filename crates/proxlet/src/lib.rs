@@ -3,6 +3,7 @@
 //! The binary is both the CLI and the daemon. This library holds everything
 //! behind `main` so integration tests can drive it.
 
+pub mod attach;
 pub mod cli;
 pub mod commands;
 pub mod complete;
@@ -56,10 +57,10 @@ fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
             init_logging();
             daemon::run(locations)
         }
-        Command::Start => commands::service::start(locations),
+        Command::Start { yes } => commands::service::start(locations, *yes),
         Command::Stop => commands::service::stop(locations),
         Command::Status => commands::status::run(locations),
-        Command::Add { route, target } => commands::rules::add(locations, route, target),
+        Command::Add { route, target, yes } => commands::rules::add(locations, route, target, *yes),
         Command::Rm { route } => commands::rules::rm(locations, route),
         Command::Ls => commands::rules::ls(locations),
         Command::Config { key, value } => {
