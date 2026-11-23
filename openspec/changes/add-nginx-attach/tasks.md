@@ -40,8 +40,8 @@
 
 ## 6. Watching nginx (proxlet)
 
-- [ ] 6.1 Follow nginx's error log while `Standalone` and release on a bind failure for the HTTP port; verify with a daemon test that appends a bind-failure line to a fixture log and asserts the port is freed within 500 ms
-- [ ] 6.2 Add the process-watch fallback for an unreadable log, and reclaim from `Released` once no nginx runs (10 s at most); verify with unit tests over a fake process source and clock for "nginx fails for another reason"
+- [x] 6.1 Follow nginx's error log while `Standalone` and release on a bind failure for the HTTP port; verify with a daemon test that appends a bind-failure line to a fixture log and asserts the port is freed within 500 ms
+- [x] 6.2 Add the process-watch fallback for an unreadable log, and reclaim from `Released` once no nginx runs (10 s at most); verify with unit tests over a fake process source and clock for "nginx fails for another reason"
 
 ## 7. End to end and docs
 

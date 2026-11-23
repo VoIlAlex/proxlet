@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::io::Write as _;
 use std::time::Duration;
 
 use common::*;
@@ -150,4 +151,44 @@ fn behind_nginx_status_and_reclaim() {
     home.wait_for_status("mode    standalone", Duration::from_secs(5));
     assert_eq!(home.get("x", "/").0, 404);
     mode(0o755);
+}
+
+#[test]
+fn a_bind_failure_in_nginxs_log_hands_the_port_over() {
+    let home = Home::with_nginx(false);
+    let log = home.path().join("nginx/error.log");
+    std::fs::write(
+        &log,
+        "2026/11/23 09:00:00 [notice] 1#1: start worker processes\n",
+    )
+    .unwrap();
+    let _daemon = home.start();
+    home.wait_for_status("mode    standalone", Duration::from_secs(5));
+    let port_free = || std::net::TcpListener::bind(("127.0.0.1", home.port)).is_ok();
+    assert!(!port_free());
+
+    // Another port's failure is not ours.
+    let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+    writeln!(
+        f,
+        "2026/11/23 09:00:01 [emerg] 2#2: bind() to 0.0.0.0:1 failed (98: Address already in use)"
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!port_free(), "released for another port's failure");
+
+    let written = std::time::Instant::now();
+    writeln!(
+        f,
+        "2026/11/23 09:00:02 [emerg] 2#2: bind() to 0.0.0.0:{} failed (98: Address already in use)",
+        home.port
+    )
+    .unwrap();
+    while !port_free() {
+        assert!(
+            written.elapsed() < Duration::from_millis(500),
+            "port not released within 500 ms"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

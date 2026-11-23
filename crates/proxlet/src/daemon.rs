@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proxlet_core::{ConfigFile, Locations, port};
-use proxlet_front::{FrontServer, Nginx};
+use proxlet_front::FrontServer;
 use proxlet_server::{Connections, Engine, Origin, Snapshot};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -61,7 +61,7 @@ async fn run_async(locations: &Locations) -> CmdResult {
 
     let internal_listener = bind_internal(internal)?;
     let foreground = std::env::var_os(SERVICE_ENV).is_none();
-    let front = attach::system_front();
+    let front: Arc<dyn FrontServer> = Arc::from(attach::system_front());
     let ledger = locations.state_dir.join(attach::LEDGER);
     let attached_here = foreground && attach_in_foreground(&*front, &ledger, settings);
     let first = bind_public(listen)?;
@@ -105,10 +105,11 @@ async fn run_async(locations: &Locations) -> CmdResult {
         Origin::Front,
         stopped(stop_rx.clone()),
     ));
+    spawn_watcher(&front, &engine, &state, listen.port(), &stop_rx);
     let owner = ports::Owner {
         binder: Box::new(move || std::net::TcpListener::bind(listen)),
         probe: Arc::new(HostProbe {
-            front: Box::new(Nginx::default()),
+            front: front.clone(),
         }),
         engine,
         conns: conns.clone(),
@@ -139,6 +140,34 @@ async fn run_async(locations: &Locations) -> CmdResult {
     let _ = std::fs::remove_file(&socket);
     tracing::info!("stopped");
     Ok(())
+}
+
+/// Follows the front server, if one is installed, to hand it the port when it starts.
+fn spawn_watcher(
+    front: &Arc<dyn FrontServer>,
+    engine: &Arc<Engine>,
+    state: &Arc<State>,
+    port: u16,
+    stop: &watch::Receiver<bool>,
+) {
+    let Some(inst) = front.detect() else {
+        return;
+    };
+    let log = front
+        .read(&inst)
+        .ok()
+        .and_then(|cfg| front.error_log(&inst, &cfg))
+        .or(inst.default_error_log);
+    let engine = engine.clone();
+    tokio::spawn(crate::watch::run(
+        front.clone(),
+        log,
+        port,
+        move || engine.snapshot().settings().attach_enabled,
+        state.mode.clone(),
+        state.ports.clone(),
+        stop.clone(),
+    ));
 }
 
 async fn stopped(mut rx: watch::Receiver<bool>) {
@@ -230,7 +259,7 @@ fn detach_in_foreground(front: &dyn FrontServer, ledger: &Path) {
 
 /// Recognises the process holding the public port (design decision 6).
 struct HostProbe {
-    front: Box<dyn FrontServer>,
+    front: Arc<dyn FrontServer>,
 }
 
 impl ports::Probe for HostProbe {

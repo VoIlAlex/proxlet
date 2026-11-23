@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod output;
 pub mod pipeline;
 pub mod ports;
+pub mod watch;
 
 use std::process::ExitCode;
 
