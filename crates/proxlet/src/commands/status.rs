@@ -24,7 +24,7 @@ pub fn run(locations: &Locations) -> CmdResult {
     anstream::println!("{OK}●{OK:#} proxlet is {BOLD}running{BOLD:#}");
     let rows = [
         ("mode", s.mode.clone()),
-        ("listen", format!("http://{}", s.listen)),
+        ("listen", listen_line(&s)),
         ("run by", run_by),
         ("uptime", uptime(s.uptime_secs)),
         ("rules", s.rules.to_string()),
@@ -34,6 +34,22 @@ pub fn run(locations: &Locations) -> CmdResult {
         anstream::println!("  {DIM}{k:<8}{DIM:#}{v}");
     }
     Ok(())
+}
+
+/// Where requests reach proxlet, given its mode.
+fn listen_line(s: &control::StatusInfo) -> String {
+    let port = s.listen.rsplit(':').next().unwrap_or("80");
+    if let Some(front) = s
+        .mode
+        .strip_prefix("attached (")
+        .and_then(|m| m.strip_suffix(')'))
+    {
+        return format!("http://{} (behind {front} on port {port})", s.internal);
+    }
+    if s.mode == "standalone" || s.internal.is_empty() {
+        return format!("http://{}", s.listen);
+    }
+    format!("http://{} (port {port} not available yet)", s.internal)
 }
 
 fn uptime(secs: u64) -> String {
@@ -48,7 +64,34 @@ fn uptime(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::uptime;
+    use super::{listen_line, uptime};
+    use crate::control::StatusInfo;
+
+    fn info(mode: &str) -> StatusInfo {
+        StatusInfo {
+            version: "0".into(),
+            pid: 1,
+            mode: mode.into(),
+            listen: "0.0.0.0:80".into(),
+            internal: "127.0.0.1:47080".into(),
+            run_by: "foreground".into(),
+            uptime_secs: 0,
+            rules: 0,
+        }
+    }
+
+    #[test]
+    fn listen_line_follows_the_mode() {
+        assert_eq!(listen_line(&info("standalone")), "http://0.0.0.0:80");
+        assert_eq!(
+            listen_line(&info("attached (nginx)")),
+            "http://127.0.0.1:47080 (behind nginx on port 80)"
+        );
+        assert_eq!(
+            listen_line(&info("waiting for port 80 (held by caddy)")),
+            "http://127.0.0.1:47080 (port 80 not available yet)"
+        );
+    }
 
     #[test]
     fn uptime_is_short() {

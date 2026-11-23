@@ -10,6 +10,7 @@ pub mod control;
 pub mod daemon;
 pub mod output;
 pub mod pipeline;
+pub mod ports;
 
 use std::process::ExitCode;
 
@@ -63,6 +64,9 @@ fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
         Command::Ls => commands::rules::ls(locations),
         Command::Config { key, value } => {
             commands::config::run(locations, key.as_deref(), value.as_deref())
+        }
+        Command::Handoff { action, socket } => {
+            commands::handoff::run(locations, *action, socket.as_deref())
         }
         Command::Logs { .. } => not_yet("logs", "structured logs"),
         Command::Cert { .. } => not_yet("cert", "certificates"),

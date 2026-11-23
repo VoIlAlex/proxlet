@@ -150,16 +150,36 @@ pub fn start_with(host: &Host, locations: &Locations) -> CmdResult {
 
     let result = host.wait_for(|| {
         if let Some(s) = (host.probe)() {
+            if s.mode.contains(crate::ports::CHECKING) {
+                return None;
+            }
             output::success(format!(
                 "proxlet is running as a {} service",
                 manager.name()
             ));
-            output::note(format!(
-                "listening on http://{} · {} rule{} · starts at boot",
-                s.listen,
-                s.rules,
-                if s.rules == 1 { "" } else { "s" }
-            ));
+            let rules = format!("{} rule{}", s.rules, if s.rules == 1 { "" } else { "s" });
+            let port = s.listen.rsplit(':').next().unwrap_or("80");
+            if let Some(reason) = s
+                .mode
+                .strip_prefix(&format!("waiting for port {port} ("))
+                .and_then(|r| r.strip_suffix(')'))
+            {
+                let pid = port.parse().ok().and_then(proxlet_core::port::holder);
+                output::warn(format!(
+                    "waiting for port {port}, {reason}{}",
+                    pid.map(|h| format!(" (pid {})", h.pid)).unwrap_or_default()
+                ));
+                output::note(format!(
+                    "proxlet takes port {port} as soon as it is free · {rules} · starts at boot"
+                ));
+            } else if s.mode == "standalone" {
+                output::note(format!(
+                    "listening on http://{} · {rules} · starts at boot",
+                    s.listen
+                ));
+            } else {
+                output::note(format!("{} · {rules} · starts at boot", s.mode));
+            }
             output::note("Stop it with: sudo proxlet stop");
             return Some(Ok(()));
         }
@@ -310,6 +330,8 @@ mod tests {
         running: Cell<bool>,
         /// What the daemon does once started: come up, or crash.
         comes_up: Cell<bool>,
+        /// The mode the daemon reports, if not `standalone`.
+        mode: RefCell<Option<String>>,
     }
 
     struct FakeManager(Rc<FakeState>);
@@ -356,6 +378,7 @@ mod tests {
             pid: 42,
             mode: "standalone".into(),
             listen: "0.0.0.0:80".into(),
+            internal: "127.0.0.1:47080".into(),
             run_by: run_by.into(),
             uptime_secs: 1,
             rules: 2,
@@ -374,7 +397,16 @@ mod tests {
                 group: "staff".into(),
             }),
             exe: "/usr/local/bin/proxlet".into(),
-            probe: Box::new(move || probe_state.running.get().then(|| status("systemd"))),
+            probe: Box::new(move || {
+                probe_state.running.get().then(|| StatusInfo {
+                    mode: probe_state
+                        .mode
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| "standalone".into()),
+                    ..status("systemd")
+                })
+            }),
             request_shutdown: Box::new(move || {
                 stop_state.running.set(false);
                 true
@@ -386,6 +418,28 @@ mod tests {
 
     fn locations() -> Locations {
         Locations::for_user_home(Path::new("/home/alice"))
+    }
+
+    #[test]
+    fn start_on_a_taken_port_succeeds_and_waits_for_it() {
+        let fake = Rc::new(FakeState::default());
+        fake.comes_up.set(true);
+        *fake.mode.borrow_mut() = Some("waiting for port 80 (held by caddy)".into());
+        start_with(&host(&fake, true, true), &locations()).unwrap();
+        assert_eq!(*fake.calls.borrow(), ["install", "start"]);
+    }
+
+    #[test]
+    fn start_waits_until_the_port_has_been_checked() {
+        let fake = Rc::new(FakeState::default());
+        fake.comes_up.set(true);
+        *fake.mode.borrow_mut() = Some(format!("waiting for port 80 ({})", crate::ports::CHECKING));
+        let err = start_with(&host(&fake, true, true), &locations()).unwrap_err();
+        assert!(
+            err.message.contains("did not start serving"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

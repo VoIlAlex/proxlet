@@ -86,8 +86,18 @@ impl Engine {
         self.snapshot.load_full()
     }
 
-    /// Handles one request.
+    /// Handles one request from a client that connected directly.
     pub async fn handle(&self, peer: SocketAddr, req: Request<Incoming>) -> Response<Body> {
+        self.handle_from(peer, Origin::Direct, req).await
+    }
+
+    /// Handles one request that arrived through `origin`.
+    pub async fn handle_from(
+        &self,
+        peer: SocketAddr,
+        origin: Origin,
+        req: Request<Incoming>,
+    ) -> Response<Body> {
         let snap = self.snapshot.load_full();
         let host = req
             .uri()
@@ -106,7 +116,7 @@ impl Engine {
             snapshot::Handler::Proxy(target) => {
                 let client = self.client.load().client.clone();
                 let timeout = snap.settings.proxy_timeout;
-                proxy::forward(client, timeout, target, peer, host, req).await
+                proxy::forward(client, timeout, target, peer, origin, host, req).await
             }
             snapshot::Handler::Files(target) => {
                 files::serve(&snap.settings, target, m.prefix, &req).await
@@ -115,20 +125,75 @@ impl Engine {
     }
 }
 
-/// Accepts connections on `listener` and serves them until `shutdown`
-/// resolves. Then it stops accepting, gives open connections up to `grace` to
-/// finish their requests, and returns.
-pub async fn serve(
+/// Where a connection came from, which decides how forwarding headers are set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A client connected to proxlet directly.
+    Direct,
+    /// A trusted front server (nginx) on loopback forwarded the request; its
+    /// `X-Forwarded-For` and `X-Forwarded-Proto` are kept as they are.
+    Front,
+}
+
+/// The open connections of every listener, so they can be drained together.
+///
+/// Cloning shares the set. Stopping one listener's accept loop leaves its
+/// connections running; [`Connections::drain`] ends them all.
+#[derive(Clone)]
+pub struct Connections {
+    graceful: Arc<GracefulShutdown>,
+}
+
+impl std::fmt::Debug for Connections {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connections").finish_non_exhaustive()
+    }
+}
+
+impl Default for Connections {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Connections {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            graceful: Arc::new(GracefulShutdown::new()),
+        }
+    }
+
+    /// Asks every open connection to finish its current request and close,
+    /// waiting up to `grace`. Call it after every accept loop has returned.
+    pub async fn drain(self, grace: Duration) {
+        let Some(graceful) = Arc::into_inner(self.graceful) else {
+            tracing::warn!("an accept loop is still running; not waiting for connections");
+            return;
+        };
+        tokio::select! {
+            () = graceful.shutdown() => {}
+            () = tokio::time::sleep(grace) => {
+                tracing::warn!("grace period of {}s ended with connections still open", grace.as_secs());
+            }
+        }
+    }
+}
+
+/// Accepts connections on `listener` until `stop` resolves, then closes the
+/// listener and returns. Accepted connections keep running in `conns`.
+pub async fn accept(
     listener: TcpListener,
     engine: Arc<Engine>,
-    shutdown: impl Future<Output = ()>,
-    grace: Duration,
+    conns: Connections,
+    origin: Origin,
+    stop: impl Future<Output = ()>,
 ) {
-    let graceful = GracefulShutdown::new();
-    tokio::pin!(shutdown);
+    tokio::pin!(stop);
     loop {
         let (stream, peer) = tokio::select! {
-            () = &mut shutdown => break,
+            () = &mut stop => break,
             accepted = listener.accept() => match accepted {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -143,12 +208,12 @@ pub async fn serve(
         let engine = engine.clone();
         let service = service_fn(move |req| {
             let engine = engine.clone();
-            async move { Ok::<_, Infallible>(engine.handle(peer, req).await) }
+            async move { Ok::<_, Infallible>(engine.handle_from(peer, origin, req).await) }
         });
         let conn = auto::Builder::new(TokioExecutor::new())
             .serve_connection_with_upgrades(TokioIo::new(stream), service)
             .into_owned();
-        let conn = graceful.watch(conn);
+        let conn = conns.graceful.watch(conn);
         tokio::spawn(async move {
             if let Err(e) = conn.await {
                 tracing::debug!(%peer, "connection ended with error: {e}");
@@ -156,10 +221,18 @@ pub async fn serve(
         });
     }
     drop(listener);
-    tokio::select! {
-        () = graceful.shutdown() => {}
-        () = tokio::time::sleep(grace) => {
-            tracing::warn!("grace period of {}s ended with connections still open", grace.as_secs());
-        }
-    }
+}
+
+/// Accepts connections on `listener` and serves them until `shutdown`
+/// resolves. Then it stops accepting, gives open connections up to `grace` to
+/// finish their requests, and returns.
+pub async fn serve(
+    listener: TcpListener,
+    engine: Arc<Engine>,
+    shutdown: impl Future<Output = ()>,
+    grace: Duration,
+) {
+    let conns = Connections::new();
+    accept(listener, engine, conns.clone(), Origin::Direct, shutdown).await;
+    conns.drain(grace).await;
 }

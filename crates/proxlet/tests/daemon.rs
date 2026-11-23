@@ -35,24 +35,31 @@ fn ctrl_c_shuts_down_cleanly() {
 }
 
 #[test]
-fn port_taken_names_port_and_holder() {
+fn port_taken_waits_and_names_the_holder() {
     let home = Home::new();
-    let _holder = std::net::TcpListener::bind(("127.0.0.1", home.port)).unwrap();
-    let out = home.run(&["run"]);
-    assert_eq!(out.code, 1, "{}", out.stderr);
-    assert!(
-        out.stderr
-            .contains(&format!("port {} is already in use", home.port)),
-        "{}",
-        out.stderr
-    );
+    let holder = std::net::TcpListener::bind(("127.0.0.1", home.port)).unwrap();
+    let daemon = home.start();
     // The holder is this test process; lsof or /proc should find it.
+    let log = daemon.wait_for_log("waiting for it to be free", Duration::from_secs(10));
     assert!(
-        out.stderr.contains(&format!("pid {}", std::process::id())),
-        "holder not named: {}",
-        out.stderr
+        log.contains(&format!("port {} is already in use by", home.port)),
+        "{log}"
     );
-    assert!(!home.socket().exists());
+    assert!(
+        log.contains(&format!("(pid {})", std::process::id())),
+        "holder not named: {log}"
+    );
+    home.wait_for_status(
+        &format!("waiting for port {} (held by ", home.port),
+        Duration::from_secs(5),
+    );
+    // Rules are still served on the internal listener meanwhile.
+    assert_eq!(home.get_internal("x", "/").0, 404);
+
+    // Port freed while waiting: proxlet takes it within 5 seconds.
+    drop(holder);
+    home.wait_for_status("mode    standalone", Duration::from_secs(5));
+    assert_eq!(home.get("x", "/").0, 404);
 }
 
 #[test]
@@ -74,7 +81,7 @@ fn status_reports_running_details() {
     out.ok();
     for needle in [
         "running".to_owned(),
-        "standalone".to_owned(),
+        "mode    standalone".to_owned(),
         format!("http://127.0.0.1:{}", home.port),
         format!("foreground (pid {})", daemon.pid()),
         "rules   0".to_owned(),
@@ -141,4 +148,49 @@ fn shutdown_request_stops_the_daemon() {
         assert!(Instant::now() < deadline, "daemon did not stop");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+#[test]
+fn handoff_release_frees_the_port_and_reclaim_takes_it_back() {
+    let home = Home::new();
+    let _daemon = home.start();
+    assert!(!port_is_free(home.port));
+
+    let out = home.run(&["handoff", "release"]);
+    out.ok();
+    assert!(
+        out.stderr.contains("released the HTTP port"),
+        "{}",
+        out.stderr
+    );
+    // The release returns only once the listener is closed.
+    assert!(port_is_free(home.port), "port still held after release");
+    // The internal listener keeps serving meanwhile.
+    assert_eq!(home.get_internal("x", "/").0, 404);
+
+    home.run(&["handoff", "reclaim"]).ok();
+    home.wait_for_status("mode    standalone", Duration::from_secs(5));
+    assert_eq!(home.get("x", "/").0, 404);
+}
+
+#[test]
+fn handoff_succeeds_when_proxlet_is_not_running() {
+    let home = Home::new();
+    for action in ["release", "reclaim"] {
+        let out = home.run(&["handoff", action]);
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert!(out.stderr.contains("not running"), "{}", out.stderr);
+    }
+    // An explicit socket that does not exist is fine too.
+    home.run(&[
+        "handoff",
+        "release",
+        "--socket",
+        "/nonexistent/proxlet.sock",
+    ])
+    .ok();
 }

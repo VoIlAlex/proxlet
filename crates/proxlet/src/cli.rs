@@ -1,6 +1,8 @@
 //! The command-line interface definition.
 
-use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, PathCompleter};
 
 use crate::complete;
@@ -71,6 +73,24 @@ pub enum Command {
         #[arg(add = ArgValueCompleter::new(complete::setting_values))]
         value: Option<String>,
     },
+    /// Hand the HTTP port to a front server, or take it back (used by service hooks)
+    #[command(hide = true)]
+    Handoff {
+        /// `release` before the front server starts, `reclaim` after it stops
+        action: HandoffAction,
+        /// The daemon's control socket, when running as another user
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
+/// What `proxlet handoff` asks the daemon to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HandoffAction {
+    /// Let go of the HTTP port.
+    Release,
+    /// Take the HTTP port back.
+    Reclaim,
 }
 
 #[cfg(test)]

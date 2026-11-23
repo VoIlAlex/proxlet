@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_proxlet");
@@ -13,6 +14,8 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_proxlet");
 pub struct Home {
     pub dir: tempfile::TempDir,
     pub port: u16,
+    /// The internal (attach) listener's port.
+    pub internal_port: u16,
 }
 
 pub struct Run {
@@ -58,9 +61,12 @@ impl Home {
         let home = Self {
             dir,
             port: free_port(),
+            internal_port: free_port(),
         };
         home.run(&["config", "listen.address", "127.0.0.1"]).ok();
         home.run(&["config", "listen.http_port", &home.port.to_string()])
+            .ok();
+        home.run(&["config", "attach.port", &home.internal_port.to_string()])
             .ok();
         home
     }
@@ -99,7 +105,10 @@ impl Home {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut daemon = Daemon { child: Some(child) };
+        let mut daemon = Daemon {
+            child: Some(child),
+            log: Arc::default(),
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.run(&["status"]).code != 0 {
             let child = daemon.child.as_mut().unwrap();
@@ -119,7 +128,39 @@ impl Home {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+        let stderr = daemon.child.as_mut().unwrap().stderr.take().unwrap();
+        let log = daemon.log.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr).lines() {
+                let Ok(line) = line else { return };
+                let mut log = log.lock().unwrap();
+                log.push_str(&line);
+                log.push('\n');
+            }
+        });
         daemon
+    }
+
+    /// Sends `GET path` to the internal (front-server) listener.
+    pub fn get_internal(&self, host: &str, path: &str) -> (u16, String) {
+        http_get(self.internal_port, host, path)
+    }
+
+    /// Polls `status` until its output contains `needle`, and returns it.
+    pub fn wait_for_status(&self, needle: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        loop {
+            let out = self.run(&["status"]).stdout;
+            if out.contains(needle) {
+                return out;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "status never showed {needle:?}:\n{out}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Sends `GET path` with `Host: host` to the server and returns (status, body).
@@ -165,9 +206,26 @@ pub fn http_get(port: u16, host: &str, path: &str) -> (u16, String) {
 
 pub struct Daemon {
     child: Option<Child>,
+    log: Arc<Mutex<String>>,
 }
 
 impl Daemon {
+    /// Waits until the daemon's log contains `needle`, and returns the log so far.
+    pub fn wait_for_log(&self, needle: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        loop {
+            let log = self.log.lock().unwrap().clone();
+            if log.contains(needle) {
+                return log;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "log never showed {needle:?}:\n{log}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     pub fn pid(&self) -> u32 {
         self.child.as_ref().unwrap().id()
     }

@@ -244,6 +244,19 @@ fn config_restart_needed_notice() {
 }
 
 #[test]
+fn attach_port_needs_a_restart() {
+    let home = Home::new();
+    let _daemon = home.start();
+    let out = home.run(&["config", "attach.port", &free_port().to_string()]);
+    out.ok();
+    assert!(
+        out.stderr.contains("takes effect after a restart"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
 fn config_duration_value() {
     let home = Home::new();
     home.run(&["config", "proxy.timeout", "2m"]).ok();
