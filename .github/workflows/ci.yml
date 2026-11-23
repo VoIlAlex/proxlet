@@ -120,6 +120,8 @@ jobs:
           set -euxo pipefail
           sudo apt-get update -q
           sudo apt-get install -y -q nginx
+          # The runner image ships nginx with its service disabled.
+          sudo systemctl enable --now nginx
           systemctl is-active nginx
           printf 'server {\n    listen 80;\n    server_name site.test;\n    return 200 "from nginx\\n";\n}\n' \
             | sudo tee /etc/nginx/sites-enabled/site
