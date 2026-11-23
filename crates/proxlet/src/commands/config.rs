@@ -57,7 +57,7 @@ fn list(locations: &Locations) -> CmdResult {
 fn set(locations: &Locations, key: &str, raw: &str) -> CmdResult {
     let def = settings::lookup(key)?;
     let value = settings::Value::parse(def, raw)?;
-    let submitted = submit(locations, &Change::SetSetting(def, value))?;
+    let submitted = submit(locations, &Change::SetSetting(def, value.clone()))?;
     let restart_needed = match &submitted.outcome {
         WireOutcome::SettingChanged {
             previous,

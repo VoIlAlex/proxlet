@@ -2,9 +2,9 @@
 
 ## 1. Settings (proxlet-core)
 
-- [ ] 1.1 Add `listen.https_port` (`443`, on restart), `tls.redirect` (`on`, live) and `cert.server` (`production` / `staging` / `https://` URL, live); verify with unit tests for defaults and parsing, and CLI tests for "HTTPS port needs a restart" and "Invalid ACME server"
-- [ ] 1.2 Validate settings against each other when one is written (HTTPS port differs from `listen.http_port` and `attach.port`), changing nothing on failure; verify with a CLI test for "Same port twice", plus the reverse (changing `listen.http_port` to the HTTPS port)
-- [ ] 1.3 Document the three settings in the settings table in `docs/usage.md`
+- [x] 1.1 Add `listen.https_port` (`443`, on restart), `tls.redirect` (`on`, live) and `cert.server` (`production` / `staging` / `https://` URL, live); verify with unit tests for defaults and parsing, and CLI tests for "HTTPS port needs a restart" and "Invalid ACME server"
+- [x] 1.2 Validate settings against each other when one is written (HTTPS port differs from `listen.http_port` and `attach.port`), changing nothing on failure; verify with a CLI test for "Same port twice", plus the reverse (changing `listen.http_port` to the HTTPS port)
+- [x] 1.3 Document the three settings in the settings table in `docs/usage.md`
 
 ## 2. Certificate store (new crate proxlet-cert)
 

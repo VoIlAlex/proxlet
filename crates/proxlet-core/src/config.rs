@@ -54,6 +54,9 @@ pub enum ChangeError {
     /// `rm` named a route that has no rule.
     #[error("there is no rule for `{0}`; run `proxlet ls` to see the rules")]
     NoSuchRule(Route),
+    /// The new value conflicts with another setting.
+    #[error(transparent)]
+    Setting(#[from] crate::settings::SettingError),
 }
 
 /// The configuration: settings and rules, in file order.
@@ -146,6 +149,10 @@ impl ConfigDoc {
                 config.rules.push(rule);
             }
         }
+        config
+            .settings
+            .check(None)
+            .map_err(|e| invalid(e.to_string()))?;
         Ok(config)
     }
 
@@ -192,6 +199,9 @@ impl ConfigDoc {
             }
             Change::SetSetting(def, v) => {
                 let previous = current.settings.get(def);
+                let mut next = current.settings.clone();
+                next.set(def, v.clone());
+                next.check(Some(def.key))?;
                 let (group, name) = group_and_name(def.key);
                 let is_default = *v == Settings::default().get(def);
                 if is_default {
@@ -208,11 +218,12 @@ impl ConfigDoc {
                         .or_insert_with(|| Item::Table(Table::new()))
                         .as_table_mut()
                         .expect("settings group is a table");
-                    table.insert(name, setting_to_item(*v));
+                    table.insert(name, setting_to_item(v));
                 }
+                let restart_needed = !def.live && previous != *v;
                 Ok(Outcome::SettingChanged {
                     previous,
-                    restart_needed: !def.live && previous != *v,
+                    restart_needed,
                 })
             }
         }
@@ -245,15 +256,15 @@ fn item_to_setting_text(item: &Item, kind: Kind) -> Option<String> {
             .map(|b| if b { "on" } else { "off" }.to_owned())
             .or_else(|| v.as_str().map(str::to_owned)),
         Kind::Port => v.as_integer().map(|i| i.to_string()),
-        Kind::Ip | Kind::Duration => v.as_str().map(str::to_owned),
+        Kind::Ip | Kind::Duration | Kind::AcmeServer => v.as_str().map(str::to_owned),
     }
 }
 
-fn setting_to_item(v: Value) -> Item {
+fn setting_to_item(v: &Value) -> Item {
     match v {
-        Value::Bool(b) => value(b),
-        Value::Port(p) => value(i64::from(p)),
-        Value::Ip(_) | Value::Duration(_) => value(v.to_string()),
+        Value::Bool(b) => value(*b),
+        Value::Port(p) => value(i64::from(*p)),
+        Value::Ip(_) | Value::Duration(_) | Value::AcmeServer(_) => value(v.to_string()),
     }
 }
 

@@ -16,6 +16,7 @@ pub struct Home {
     pub port: u16,
     /// The internal (attach) listener's port.
     pub internal_port: u16,
+    pub https_port: u16,
     /// A fake `nginx` script, if this home has one.
     pub nginx: Option<PathBuf>,
 }
@@ -64,12 +65,15 @@ impl Home {
             dir,
             port: free_port(),
             internal_port: free_port(),
+            https_port: free_port(),
             nginx: None,
         };
         home.run(&["config", "listen.address", "127.0.0.1"]).ok();
         home.run(&["config", "listen.http_port", &home.port.to_string()])
             .ok();
         home.run(&["config", "attach.port", &home.internal_port.to_string()])
+            .ok();
+        home.run(&["config", "listen.https_port", &home.https_port.to_string()])
             .ok();
         home
     }

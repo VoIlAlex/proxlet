@@ -257,6 +257,77 @@ fn attach_port_needs_a_restart() {
 }
 
 #[test]
+fn https_port_needs_a_restart() {
+    let home = Home::new();
+    let _daemon = home.start();
+    let out = home.run(&["config", "listen.https_port", &free_port().to_string()]);
+    out.ok();
+    assert!(
+        out.stderr.contains("takes effect after a restart"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn ports_must_differ_and_nothing_changes() {
+    let home = Home::new();
+    let http = home.port.to_string();
+    let before = home
+        .run(&["config", "listen.https_port"])
+        .ok()
+        .stdout
+        .clone();
+
+    let out = home.run(&["config", "listen.https_port", &http]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("the HTTPS port must differ from the HTTP port"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        home.run(&["config", "listen.https_port"]).ok().stdout,
+        before
+    );
+
+    // The reverse: moving the HTTP port onto the HTTPS port.
+    let out = home.run(&["config", "listen.http_port", before.trim()]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("the HTTP port must differ from the HTTPS port"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        home.run(&["config", "listen.http_port"]).ok().stdout,
+        format!("{http}\n")
+    );
+}
+
+#[test]
+fn acme_server_values() {
+    let home = Home::new();
+    let out = home.run(&["config", "cert.server", "http://acme.local/dir"]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("must be `production`, `staging` or an `https://` ACME directory URL"),
+        "{}",
+        out.stderr
+    );
+    home.run(&["config", "cert.server", "staging"]).ok();
+    assert_eq!(
+        home.run(&["config", "cert.server"]).ok().stdout,
+        "staging\n"
+    );
+    home.run(&["config", "tls.redirect", "off"]).ok();
+    assert_eq!(home.run(&["config", "tls.redirect"]).ok().stdout, "off\n");
+}
+
+#[test]
 fn config_duration_value() {
     let home = Home::new();
     home.run(&["config", "proxy.timeout", "2m"]).ok();

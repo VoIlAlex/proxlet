@@ -98,19 +98,25 @@ proxlet config static.listing         # print one value
 proxlet config static.listing off     # change it
 ```
 
-| Setting                 | Default   | Applies     | What it does                                            |
-| ----------------------- | --------- | ----------- | ------------------------------------------------------- |
-| `listen.address`        | `0.0.0.0` | on restart  | Address the HTTP listener binds to                      |
-| `listen.http_port`      | `80`      | on restart  | Port the HTTP listener binds to                         |
-| `static.listing`        | `on`      | immediately | List directories that have no `index.html`              |
-| `static.dotfiles`       | `off`     | immediately | Serve and list files whose name starts with a dot       |
-| `proxy.connect_timeout` | `5s`      | immediately | How long to wait for an upstream to accept a connection |
-| `proxy.timeout`         | `60s`     | immediately | How long to wait for an upstream to start responding    |
-| `attach.enabled`        | `on`      | immediately | Attach behind nginx when it holds or wants the port     |
-| `attach.port`           | `47080`   | on restart  | Loopback port nginx forwards to when proxlet is attached |
+| Setting                 | Default      | Applies     | What it does                                                   |
+| ----------------------- | ------------ | ----------- | -------------------------------------------------------------- |
+| `listen.address`        | `0.0.0.0`    | on restart  | Address the HTTP and HTTPS listeners bind to                   |
+| `listen.http_port`      | `80`         | on restart  | Port the HTTP listener binds to                                |
+| `listen.https_port`     | `443`        | on restart  | Port the HTTPS listener binds to                               |
+| `static.listing`        | `on`         | immediately | List directories that have no `index.html`                     |
+| `static.dotfiles`       | `off`        | immediately | Serve and list files whose name starts with a dot              |
+| `proxy.connect_timeout` | `5s`         | immediately | How long to wait for an upstream to accept a connection        |
+| `proxy.timeout`         | `60s`        | immediately | How long to wait for an upstream to start responding           |
+| `attach.enabled`        | `on`         | immediately | Attach behind nginx when it holds or wants the port            |
+| `attach.port`           | `47080`      | on restart  | Loopback port nginx forwards to when proxlet is attached       |
+| `tls.redirect`          | `on`         | immediately | Redirect plain HTTP to HTTPS for hosts that have a certificate |
+| `cert.server`           | `production` | immediately | Where certificates come from: `production`, `staging` or a URL |
 
 Booleans accept `on`/`off` and `true`/`false`. Durations are a number with `ms`,
-`s` or `m`, for example `500ms`, `30s` or `2m`.
+`s` or `m`, for example `500ms`, `30s` or `2m`. `cert.server` is `production`
+(Let's Encrypt), `staging` (Let's Encrypt's test environment, whose
+certificates browsers do not trust) or the `https://` directory URL of any ACME
+server. The HTTP, HTTPS and attach ports must all differ.
 
 ## Running
 
