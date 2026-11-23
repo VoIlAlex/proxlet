@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proxlet_core::{ConfigFile, Locations, port};
+use proxlet_front::{FrontServer, Nginx};
 use proxlet_server::{Connections, Engine, Origin, Snapshot};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -101,7 +102,9 @@ async fn run_async(locations: &Locations) -> CmdResult {
     ));
     let owner = ports::Owner {
         binder: Box::new(move || std::net::TcpListener::bind(listen)),
-        probe: Arc::new(HostProbe),
+        probe: Arc::new(HostProbe {
+            front: Box::new(Nginx::default()),
+        }),
         engine,
         conns: conns.clone(),
         port: listen.port(),
@@ -134,20 +137,28 @@ async fn stopped(mut rx: watch::Receiver<bool>) {
     let _ = rx.wait_for(|stop| *stop).await;
 }
 
-/// Recognises the process holding the public port.
-struct HostProbe;
+/// Recognises the process holding the public port (design decision 6).
+struct HostProbe {
+    front: Box<dyn FrontServer>,
+}
 
 impl ports::Probe for HostProbe {
     fn classify(&self, port: u16, attach: bool) -> ports::Holder {
         let holder = port::holder(port);
-        if attach && holder.as_ref().is_some_and(|h| h.name == "nginx") {
-            return ports::Holder::Front("nginx");
+        if attach {
+            let cfg = self
+                .front
+                .detect()
+                .and_then(|inst| self.front.read(&inst).ok());
+            if self.front.holds(holder.as_ref(), port, cfg.as_ref()) {
+                return ports::Holder::Front(self.front.name());
+            }
         }
         ports::Holder::Other(holder)
     }
 
     fn front_running(&self) -> bool {
-        false
+        self.front.is_running()
     }
 }
 

@@ -11,16 +11,16 @@
 
 ## 2. nginx config reading (proxlet-front)
 
-- [ ] 2.1 Add the `FrontServer` trait, `Installation`, `FrontConfig`, `Plan` and `FrontError`, taking an injectable `CommandRunner`; verify that the crate builds and has docs
-- [ ] 2.2 Add an nginx config tokenizer and reader that follows `include` globs relative to the config prefix and collects `listen` (port, `default_server`, file:line), `server_name` and `error_log`; verify with fixture trees for the Debian, RHEL and Homebrew layouts, plus quoting, comments and a missing include
-- [ ] 2.3 Add `claims(host, port)` with nginx's name precedence (exact, leading wildcard, trailing wildcard, regex) and `default_server(port)`; verify with unit tests for each kind and an uncompilable regex
-- [ ] 2.4 Add nginx detection (`nginx -V` for the config path and the compiled-in error log), `is_running`, holder recognition (decision 6) and `is_bind_failure` for Linux and macOS error lines; verify with a recording runner and sample outputs
+- [x] 2.1 Add the `FrontServer` trait, `Installation`, `FrontConfig`, `Plan` and `FrontError`, taking an injectable `CommandRunner`; verify that the crate builds and has docs
+- [x] 2.2 Add an nginx config tokenizer and reader that follows `include` globs relative to the config prefix and collects `listen` (port, `default_server`, file:line), `server_name` and `error_log`; verify with fixture trees for the Debian, RHEL and Homebrew layouts, plus quoting, comments and a missing include
+- [x] 2.3 Add `claims(host, port)` with nginx's name precedence (exact, leading wildcard, trailing wildcard, regex) and `default_server(port)`; verify with unit tests for each kind and an uncompilable regex
+- [x] 2.4 Add nginx detection (`nginx -V` for the config path and the compiled-in error log), `is_running`, holder recognition (decision 6) and `is_bind_failure` for Linux and macOS error lines; verify with a recording runner and sample outputs
 
 ## 3. Applying and undoing nginx changes (proxlet-front)
 
-- [ ] 3.1 Add `plan_attach`: choose the included directory, render the catch-all block, and add the optional `default_server` move; verify with snapshot tests for each fixture layout, and that a declined takeover yields an empty plan
-- [ ] 3.2 Add the ledger and the generic plan applier (write ledger, atomic writes, `nginx -t`, reload if running, restore on failure); verify with tests using a fake runner that fails at each step and leaves the tree byte-identical
-- [ ] 3.3 Add detach from the ledger, including hash checks and re-finding a moved `listen` directive; verify with tests for a clean detach, a user-edited file and a vanished directive (warn, leave the file alone)
+- [x] 3.1 Add `plan_attach`: choose the included directory, render the catch-all block, and add the optional `default_server` move; verify with snapshot tests for each fixture layout, and that a declined takeover yields an empty plan
+- [x] 3.2 Add the ledger and the generic plan applier (write ledger, atomic writes, `nginx -t`, reload if running, restore on failure); verify with tests using a fake runner that fails at each step and leaves the tree byte-identical
+- [x] 3.3 Add detach from the ledger, including hash checks and re-finding a moved `listen` directive; verify with tests for a clean detach, a user-edited file and a vanished directive (warn, leave the file alone)
 
 ## 4. Service hooks (proxlet-service)
 

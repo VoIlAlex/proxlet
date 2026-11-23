@@ -4,6 +4,7 @@
 //! request is matched against the rule table, and how the configuration file is
 //! read, validated and written atomically.
 
+pub mod command;
 pub mod config;
 pub mod paths;
 pub mod port;

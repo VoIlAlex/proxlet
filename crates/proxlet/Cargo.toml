@@ -17,6 +17,7 @@ clap = { version = "4.6.9", features = ["derive"] }
 clap_complete = { version = "4.6.12", features = ["unstable-dynamic"] }
 nix = { version = "0.32.0", default-features = false, features = ["user", "signal"] }
 proxlet-core = { version = "0.1.0", path = "../proxlet-core" }
+proxlet-front = { version = "0.1.0", path = "../proxlet-front" }
 proxlet-server = { version = "0.1.0", path = "../proxlet-server" }
 proxlet-service = { version = "0.1.0", path = "../proxlet-service" }
 serde = { version = "1.0.229", features = ["derive"] }
