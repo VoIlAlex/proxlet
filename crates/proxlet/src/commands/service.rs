@@ -143,6 +143,7 @@ pub fn start_with(host: &Host, locations: &Locations) -> CmdResult {
             ),
         ],
         bind_privileged_ports: host.invoking_user.is_some(),
+        supplementary_groups: Vec::new(),
     };
     let service_error = |e: proxlet_service::ServiceError| Failure::new(e.to_string());
     manager.install(&spec).map_err(service_error)?;
@@ -369,6 +370,14 @@ mod tests {
         }
         fn recent_logs(&self, _: usize) -> Vec<String> {
             self.0.logs.borrow().clone()
+        }
+        fn hook(&self, unit: &str, _: &proxlet_service::UnitHook) -> Result<bool, ServiceError> {
+            self.0.calls.borrow_mut().push(format!("hook {unit}"));
+            Ok(true)
+        }
+        fn unhook(&self, unit: &str) -> Result<bool, ServiceError> {
+            self.0.calls.borrow_mut().push(format!("unhook {unit}"));
+            Ok(true)
         }
     }
 

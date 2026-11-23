@@ -7,7 +7,7 @@ the CLI or the other integrations changes.
 | Extension point    | Crate                    | Trait            | Today   |
 | ------------------ | ------------------------ | ---------------- | ------- |
 | Service managers   | `crates/proxlet-service` | `ServiceManager` | systemd |
-| Front servers      | `crates/proxlet-front`   | *(attach change)* | —       |
+| Front servers      | `crates/proxlet-front`   | `FrontServer`    | nginx   |
 | AI tools           | `crates/proxlet-ai`      | *(AI change)*    | —       |
 
 ## Adding a service manager
@@ -30,12 +30,15 @@ launchd or OpenRC:
    | `stop`        | Stop now and disable at boot |
    | `state`       | Map the manager's state to `ServiceState`; report a crash-and-retry as `Restarting` |
    | `recent_logs` | The service's latest log lines, newest last |
+   | `hook`        | Run commands before another service starts and after it stops; a failing command must never block that service |
+   | `unhook`      | Remove proxlet's hook from another service |
 
    Honour every field of `ServiceSpec`:
    - run as `run_as`, or as root when it is `None`;
    - pass every `env` pair;
    - when `bind_privileged_ports` is set, allow binding ports below 1024 without
-     full root.
+     full root;
+   - join every group in `supplementary_groups`.
 
 3. **Register it.** Add it to `system_managers()` in
    `crates/proxlet-service/src/lib.rs`, in the order it should be detected, and
@@ -45,6 +48,7 @@ launchd or OpenRC:
    and assert on:
    - the service definition you generate;
    - the exact commands for `start`, `stop` and `state`;
+   - the hook definition, and that `unhook` leaves other overrides alone;
    - how each state the tool reports maps to `ServiceState`.
 
 5. **Document it.** Add the manager and its file locations to
@@ -58,7 +62,7 @@ the trait.
 
 ```rust
 use proxlet_service::{
-    CommandRunner, ServiceError, ServiceManager, ServiceSpec, ServiceState,
+    CommandRunner, ServiceError, ServiceManager, ServiceSpec, ServiceState, UnitHook,
 };
 
 pub struct Launchd<R> {
@@ -91,5 +95,49 @@ impl<R: CommandRunner> ServiceManager for Launchd<R> {
     fn recent_logs(&self, lines: usize) -> Vec<String> {
         Vec::new()
     }
+    fn hook(&self, unit: &str, hook: &UnitHook) -> Result<bool, ServiceError> {
+        // launchd has no drop-ins; say so, and attach still works through the
+        // front server's error log.
+        Ok(false)
+    }
+    fn unhook(&self, unit: &str) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
 }
 ```
+
+## Adding a front server
+
+Attach mode talks to front servers only through `FrontServer` in
+`crates/proxlet-front`. Applying a change, checking it, reloading, rolling back
+and undoing it on `stop` are generic (`proxlet_front::apply`), so a new front
+server only describes itself. To add, say, Apache:
+
+1. **Create the module.** Add `crates/proxlet-front/src/<name>/mod.rs` with a
+   struct that takes a `CommandRunner`, as `Nginx<R>` does.
+
+2. **Implement the trait.**
+
+   | Method           | Must do |
+   | ---------------- | ------- |
+   | `name`           | Short name, shown in `status` (`attached (<name>)`) |
+   | `detect`         | Find the binary, version, main config file and default error log |
+   | `is_running`     | Whether the main process runs, without needing root |
+   | `service_unit`   | The unit to hook, e.g. `apache2.service`, or `None` |
+   | `read`           | Parse the config into `FrontConfig`: server blocks, their ports, names and default flags, and directories included where server blocks may go |
+   | `plan_attach`    | The file to write (a catch-all forwarding to proxlet's internal address) and any line edits to move the default-server flag; an empty plan when the user declines the takeover |
+   | `check`          | Validate the config, e.g. `apachectl configtest` |
+   | `reload`         | Reload a running server gracefully |
+   | `error_log`      | Where the server logs bind failures |
+   | `is_bind_failure`| Recognise its "address already in use" line for a port |
+   | `holds`          | Recognise the server as a port's holder, including when the holder can't be seen |
+
+   Mark every file you write with a first line proxlet recognises (nginx uses
+   `# Managed by proxlet.`), so `read` can tell proxlet's block from the user's.
+
+3. **Register it.** Add it to the list of front servers the CLI and daemon try.
+
+4. **Test it.** Build realistic config trees in a temporary directory (see
+   `crates/proxlet-front/tests/nginx_layouts.rs`) and assert on what `read`
+   finds and what `plan_attach` writes. Use a recording `CommandRunner` for
+   `detect`, `check` and `reload`.

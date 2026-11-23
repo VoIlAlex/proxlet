@@ -6,10 +6,13 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::{CommandRunner, ServiceError, ServiceManager, ServiceSpec, ServiceState};
+use crate::{CommandRunner, ServiceError, ServiceManager, ServiceSpec, ServiceState, UnitHook};
 
 /// The unit name.
 pub const UNIT: &str = "proxlet.service";
+
+/// The drop-in file proxlet adds to other units.
+pub const DROP_IN: &str = "proxlet.conf";
 
 /// The systemd service manager.
 #[derive(Debug)]
@@ -42,6 +45,12 @@ impl<R: CommandRunner> Systemd<R> {
     #[must_use]
     pub fn unit_path(&self) -> PathBuf {
         self.unit_dir.join(UNIT)
+    }
+
+    /// Where proxlet's drop-in for another unit is written.
+    #[must_use]
+    pub fn drop_in_path(&self, unit: &str) -> PathBuf {
+        self.unit_dir.join(format!("{unit}.d")).join(DROP_IN)
     }
 
     fn systemctl(&self, args: &[&str]) -> Result<String, ServiceError> {
@@ -83,6 +92,38 @@ impl<R: CommandRunner> ServiceManager for Systemd<R> {
         }
         write_atomic(&path, &unit)
             .map_err(|e| ServiceError::Io(format!("cannot write {}: {e}", path.display())))?;
+        self.systemctl(&["daemon-reload"])?;
+        Ok(true)
+    }
+
+    fn hook(&self, unit: &str, hook: &UnitHook) -> Result<bool, ServiceError> {
+        let text = render_drop_in(hook);
+        let path = self.drop_in_path(unit);
+        if std::fs::read_to_string(&path).is_ok_and(|current| current == text) {
+            return Ok(false);
+        }
+        write_atomic(&path, &text)
+            .map_err(|e| ServiceError::Io(format!("cannot write {}: {e}", path.display())))?;
+        self.systemctl(&["daemon-reload"])?;
+        Ok(true)
+    }
+
+    fn unhook(&self, unit: &str) -> Result<bool, ServiceError> {
+        let path = self.drop_in_path(unit);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => {
+                return Err(ServiceError::Io(format!(
+                    "cannot remove {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+        if let Some(dir) = path.parent() {
+            // Only if empty: other drop-ins stay.
+            let _ = std::fs::remove_dir(dir);
+        }
         self.systemctl(&["daemon-reload"])?;
         Ok(true)
     }
@@ -156,6 +197,32 @@ fn quote(s: &str) -> String {
     out
 }
 
+/// An argument as systemd reads it: bare when it is plain, quoted otherwise.
+fn arg(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:=@,".contains(c));
+    if plain { s.to_owned() } else { quote(s) }
+}
+
+/// proxlet's drop-in for another unit. The `-` prefix makes systemd ignore a
+/// failing (or missing) hook command, so the other service always starts.
+#[must_use]
+pub fn render_drop_in(hook: &UnitHook) -> String {
+    let line = |argv: &[String]| argv.iter().map(|a| arg(a)).collect::<Vec<_>>().join(" ");
+    let mut out = String::from(
+        "# Installed by `proxlet start`; removed by `proxlet stop`.\n\
+         [Service]\n",
+    );
+    if !hook.before_start.is_empty() {
+        let _ = writeln!(out, "ExecStartPre=-{}", line(&hook.before_start));
+    }
+    if !hook.after_stop.is_empty() {
+        let _ = writeln!(out, "ExecStopPost=-{}", line(&hook.after_stop));
+    }
+    out
+}
+
 /// The unit file for `spec`.
 #[must_use]
 pub fn render_unit(spec: &ServiceSpec) -> String {
@@ -183,6 +250,13 @@ pub fn render_unit(spec: &ServiceSpec) -> String {
     for (k, v) in &spec.env {
         let _ = writeln!(unit, "Environment={}", quote(&format!("{k}={v}")));
     }
+    if !spec.supplementary_groups.is_empty() {
+        let _ = writeln!(
+            unit,
+            "SupplementaryGroups={}",
+            spec.supplementary_groups.join(" ")
+        );
+    }
     if spec.bind_privileged_ports {
         unit.push_str("AmbientCapabilities=CAP_NET_BIND_SERVICE\n");
         unit.push_str("CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n");
@@ -203,7 +277,11 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("service.tmp");
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path)
 }
@@ -257,6 +335,7 @@ mod tests {
                 ),
             ],
             bind_privileged_ports: true,
+            supplementary_groups: Vec::new(),
         }
     }
 
@@ -278,6 +357,76 @@ mod tests {
                 "missing {line:?} in:\n{unit}"
             );
         }
+    }
+
+    #[test]
+    fn supplementary_groups_are_listed() {
+        let mut s = spec();
+        s.supplementary_groups = vec!["adm".into()];
+        assert!(
+            render_unit(&s)
+                .lines()
+                .any(|l| l == "SupplementaryGroups=adm")
+        );
+        assert!(!render_unit(&spec()).contains("SupplementaryGroups"));
+    }
+
+    fn hook() -> UnitHook {
+        let argv = |action: &str| -> Vec<String> {
+            [
+                "/usr/local/bin/proxlet",
+                "handoff",
+                action,
+                "--socket",
+                "/home/al ice/.local/state/proxlet/proxlet.sock",
+            ]
+            .map(String::from)
+            .to_vec()
+        };
+        UnitHook {
+            before_start: argv("release"),
+            after_stop: argv("reclaim"),
+        }
+    }
+
+    #[test]
+    fn drop_in_never_blocks_the_other_unit() {
+        assert_eq!(
+            render_drop_in(&hook()),
+            "# Installed by `proxlet start`; removed by `proxlet stop`.\n\
+             [Service]\n\
+             ExecStartPre=-/usr/local/bin/proxlet handoff release --socket \"/home/al ice/.local/state/proxlet/proxlet.sock\"\n\
+             ExecStopPost=-/usr/local/bin/proxlet handoff reclaim --socket \"/home/al ice/.local/state/proxlet/proxlet.sock\"\n"
+        );
+    }
+
+    #[test]
+    fn hook_and_unhook_write_and_remove_the_drop_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Recorder::default();
+        let sd = Systemd::with_paths(&rec, dir.path(), dir.path());
+        assert!(sd.hook("nginx.service", &hook()).unwrap());
+        let path = dir.path().join("nginx.service.d/proxlet.conf");
+        assert_eq!(sd.drop_in_path("nginx.service"), path);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            render_drop_in(&hook())
+        );
+        assert!(
+            !sd.hook("nginx.service", &hook()).unwrap(),
+            "unchanged drop-in rewritten"
+        );
+
+        // Another drop-in in the same directory survives.
+        std::fs::write(dir.path().join("nginx.service.d/override.conf"), "x").unwrap();
+        assert!(sd.unhook("nginx.service").unwrap());
+        assert!(!path.exists());
+        assert!(dir.path().join("nginx.service.d/override.conf").exists());
+        assert!(!sd.unhook("nginx.service").unwrap());
+        assert_eq!(
+            *rec.calls.borrow(),
+            ["systemctl daemon-reload", "systemctl daemon-reload"]
+        );
     }
 
     #[test]

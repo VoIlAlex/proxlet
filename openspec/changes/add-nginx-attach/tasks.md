@@ -24,9 +24,9 @@
 
 ## 4. Service hooks (proxlet-service)
 
-- [ ] 4.1 Add `hook(unit, before_start, after_stop)` and `unhook(unit)` to `ServiceManager`; implement them for systemd as a drop-in with `-`-prefixed `ExecStartPre` and `ExecStopPost`, plus `daemon-reload`; verify with recording-runner tests for the drop-in text and commands
-- [ ] 4.2 Add supplementary groups to `ServiceSpec` and to the rendered unit; verify with a unit-file test
-- [ ] 4.3 Update `docs/extending.md` for the new `ServiceManager` methods and add an "Adding a front server" section
+- [x] 4.1 Add `hook(unit, before_start, after_stop)` and `unhook(unit)` to `ServiceManager`; implement them for systemd as a drop-in with `-`-prefixed `ExecStartPre` and `ExecStopPost`, plus `daemon-reload`; verify with recording-runner tests for the drop-in text and commands
+- [x] 4.2 Add supplementary groups to `ServiceSpec` and to the rendered unit; verify with a unit-file test
+- [x] 4.3 Update `docs/extending.md` for the new `ServiceManager` methods and add an "Adding a front server" section
 
 ## 5. CLI: start, stop, add, ls, status (proxlet)
 
