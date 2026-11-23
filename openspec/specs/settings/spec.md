@@ -7,7 +7,6 @@ listens, proxies and serves files.
 
 ## Requirements
 
-
 ### Requirement: Listing and reading settings
 
 `proxlet config` SHALL list every setting with its current value and mark values
@@ -55,9 +54,10 @@ saved and the output SHALL say a restart is needed.
 
 proxlet SHALL provide these settings with these defaults: `listen.address`
 (`0.0.0.0`), `listen.http_port` (`80`), `static.listing` (`on`),
-`static.dotfiles` (`off`), `proxy.connect_timeout` (`5s`) and `proxy.timeout`
-(`60s`). Boolean settings SHALL accept `on`/`off` and `true`/`false`; durations
-SHALL accept a number with an `ms`, `s` or `m` suffix.
+`static.dotfiles` (`off`), `proxy.connect_timeout` (`5s`), `proxy.timeout`
+(`60s`), `attach.enabled` (`on`) and `attach.port` (`47080`). Boolean settings
+SHALL accept `on`/`off` and `true`/`false`; durations SHALL accept a number with
+an `ms`, `s` or `m` suffix.
 
 #### Scenario: Defaults on a fresh install
 
@@ -68,6 +68,11 @@ SHALL accept a number with an `ms`, `s` or `m` suffix.
 
 - **WHEN** the user runs `proxlet config proxy.timeout 2m`
 - **THEN** upstream responses are allowed up to two minutes before a 504
+
+#### Scenario: Attach port needs a restart
+
+- **WHEN** the user runs `proxlet config attach.port 47081` while proxlet is running
+- **THEN** the value is saved and the output says it takes effect when proxlet is restarted
 
 ### Requirement: Setting completion
 
