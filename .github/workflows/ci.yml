@@ -47,6 +47,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85
+      # The version is passed as an input, not as the action ref, so Dependabot
+      # does not mistake the MSRV for an outdated action version.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --locked
