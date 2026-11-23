@@ -167,7 +167,7 @@ fn ls_plain_output_and_empty_case() {
     assert_eq!(
         home.run(&["ls"]).ok().stdout,
         format!(
-            "/api\tproxy\thttp://127.0.0.1:8000\n/files\tfiles\t{}\nexample.com/api\tproxy\thttp://127.0.0.1:8002\n",
+            "/api\tproxy\thttp://127.0.0.1:8000\t\n/files\tfiles\t{}\t\nexample.com/api\tproxy\thttp://127.0.0.1:8002\t\n",
             site.display()
         )
     );
@@ -241,6 +241,19 @@ fn config_restart_needed_notice() {
     );
     // Still serving on the old port.
     assert_eq!(home.get("x", "/").0, 404);
+}
+
+#[test]
+fn attach_port_needs_a_restart() {
+    let home = Home::new();
+    let _daemon = home.start();
+    let out = home.run(&["config", "attach.port", &free_port().to_string()]);
+    out.ok();
+    assert!(
+        out.stderr.contains("takes effect after a restart"),
+        "{}",
+        out.stderr
+    );
 }
 
 #[test]

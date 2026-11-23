@@ -8,7 +8,6 @@
 pub mod systemd;
 
 use std::path::PathBuf;
-use std::process::Command;
 
 /// The manager names proxlet supports, for error messages.
 pub const SUPPORTED: &[&str] = &["systemd"];
@@ -51,6 +50,17 @@ pub struct ServiceSpec {
     pub env: Vec<(String, String)>,
     /// Whether the process must be able to bind ports below 1024.
     pub bind_privileged_ports: bool,
+    /// Extra groups the process joins, e.g. `adm` to read a front server's log.
+    pub supplementary_groups: Vec<String>,
+}
+
+/// Commands to run around another service's start and stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitHook {
+    /// Run before the other service starts: program and arguments.
+    pub before_start: Vec<String>,
+    /// Run after the other service stops: program and arguments.
+    pub after_stop: Vec<String>,
 }
 
 /// What the manager reports about the service.
@@ -86,39 +96,15 @@ pub trait ServiceManager {
     fn state(&self) -> Result<ServiceState, ServiceError>;
     /// The service's most recent log lines, newest last, for explaining failures.
     fn recent_logs(&self, lines: usize) -> Vec<String>;
+    /// Runs `hook` around another service `unit` (e.g. `nginx.service`). A
+    /// failing hook command must never stop that service. Returns whether
+    /// anything changed.
+    fn hook(&self, unit: &str, hook: &UnitHook) -> Result<bool, ServiceError>;
+    /// Removes proxlet's hook from `unit`. Returns whether anything changed.
+    fn unhook(&self, unit: &str) -> Result<bool, ServiceError>;
 }
 
-/// Runs external commands. Injected so managers can be tested without a real host.
-pub trait CommandRunner {
-    /// Runs `program args...` and returns its exit code and output.
-    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput>;
-}
-
-/// The result of running a command.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CommandOutput {
-    /// Exit code (`-1` if killed by a signal).
-    pub code: i32,
-    /// Standard output.
-    pub stdout: String,
-    /// Standard error.
-    pub stderr: String,
-}
-
-/// Runs commands on the real system.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemRunner;
-
-impl CommandRunner for SystemRunner {
-    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
-        let out = Command::new(program).args(args).output()?;
-        Ok(CommandOutput {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
-    }
-}
+pub use proxlet_core::command::{CommandOutput, CommandRunner, SystemRunner};
 
 /// Every manager proxlet knows, in detection order.
 #[must_use]
@@ -159,6 +145,12 @@ mod tests {
         }
         fn recent_logs(&self, _: usize) -> Vec<String> {
             Vec::new()
+        }
+        fn hook(&self, _: &str, _: &UnitHook) -> Result<bool, ServiceError> {
+            Ok(false)
+        }
+        fn unhook(&self, _: &str) -> Result<bool, ServiceError> {
+            Ok(false)
         }
     }
 

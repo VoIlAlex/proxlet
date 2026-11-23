@@ -27,6 +27,11 @@ pub enum Request {
     },
     /// Stop the server gracefully.
     Shutdown,
+    /// Let go of the public port so a front server can bind it. Replies once
+    /// the listener is closed.
+    Release,
+    /// Try to take the public port back now.
+    Reclaim,
 }
 
 /// A configuration change on the wire. Targets are canonical strings: an
@@ -148,10 +153,13 @@ pub struct StatusInfo {
     pub version: String,
     /// Daemon process id.
     pub pid: u32,
-    /// `standalone` (attach modes come later).
+    /// `standalone`, `attached (nginx)` or `waiting for port <n> (<reason>)`.
     pub mode: String,
-    /// The address the HTTP listener is bound to.
+    /// The public HTTP address (`listen.address:listen.http_port`).
     pub listen: String,
+    /// The internal loopback address a front server forwards to.
+    #[serde(default)]
+    pub internal: String,
     /// `systemd` when run by the service, `foreground` otherwise.
     pub run_by: String,
     /// Seconds since the daemon started.
@@ -206,8 +214,13 @@ pub struct Client {
 impl Client {
     /// Connects to the daemon's socket. Fails if no daemon is listening.
     pub fn connect(socket: &Path) -> std::io::Result<Self> {
+        Self::connect_with_timeout(socket, Duration::from_secs(30))
+    }
+
+    /// Like [`Client::connect`], waiting at most `timeout` for each reply.
+    pub fn connect_with_timeout(socket: &Path, timeout: Duration) -> std::io::Result<Self> {
         let stream = UnixStream::connect(socket)?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         Ok(Self {
             reader: BufReader::new(stream),

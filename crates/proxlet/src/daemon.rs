@@ -7,14 +7,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proxlet_core::{ConfigFile, Locations, port};
-use proxlet_server::{Engine, Snapshot};
+use proxlet_front::FrontServer;
+use proxlet_server::{Connections, Engine, Origin, Snapshot};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::attach;
 use crate::control::{self, Reply, Request, StatusInfo, WireOutcome};
 use crate::output::{CmdResult, Failure};
 use crate::pipeline;
+use crate::ports::{self, Mode};
 
 /// How long in-flight requests get to finish after a stop signal.
 pub const GRACE: Duration = Duration::from_secs(10);
@@ -28,6 +31,9 @@ struct State {
     apply_lock: Mutex<()>,
     started: Instant,
     listen: SocketAddr,
+    internal: SocketAddr,
+    mode: watch::Receiver<Mode>,
+    ports: mpsc::Sender<ports::Command>,
     run_by: String,
     stop: watch::Sender<bool>,
 }
@@ -49,62 +55,257 @@ async fn run_async(locations: &Locations) -> CmdResult {
     let file = ConfigFile::new(locations.config_file());
     let (_, config) = file.read()?;
     let snapshot = Snapshot::build(&config).map_err(|e| Failure::new(e.to_string()))?;
-    let addr = SocketAddr::new(config.settings.listen_address, config.settings.http_port);
-    let listener = bind_http(addr)?;
-    let listen = listener.local_addr().unwrap_or(addr);
+    let settings = &config.settings;
+    let listen = SocketAddr::new(settings.listen_address, settings.http_port);
+    let internal = SocketAddr::from(([127, 0, 0, 1], settings.attach_port));
+
+    let internal_listener = bind_internal(internal)?;
+    let foreground = std::env::var_os(SERVICE_ENV).is_none();
+    let front: Arc<dyn FrontServer> = Arc::from(attach::system_front());
+    let ledger = locations.state_dir.join(attach::LEDGER);
+    let attached_here = foreground && attach_in_foreground(&*front, &ledger, settings);
+    let first = bind_public(listen)?;
     let control_listener = bind_control(locations)?;
 
     let rules = snapshot.rule_count();
-    let (stop, mut stop_rx) = watch::channel(false);
+    let engine = Engine::new(snapshot);
+    let conns = Connections::new();
+    let (stop, stop_rx) = watch::channel(false);
+    let (mode_tx, mode) = watch::channel(Mode::Waiting {
+        reason: ports::CHECKING.into(),
+    });
+    let (ports_tx, ports_rx) = mpsc::channel(8);
     let state = Arc::new(State {
-        engine: Engine::new(snapshot),
+        engine: engine.clone(),
         file,
         apply_lock: Mutex::new(()),
         started: Instant::now(),
         listen,
+        internal,
+        mode,
+        ports: ports_tx,
         run_by: std::env::var(SERVICE_ENV).unwrap_or_else(|_| "foreground".into()),
         stop,
     });
 
     tokio::spawn(control_loop(control_listener, state.clone()));
     tracing::info!(
-        "proxlet {} listening on http://{listen} ({rules} rule{})",
+        "proxlet {} started with {rules} rule{}; internal listener on http://{internal}",
         env!("CARGO_PKG_VERSION"),
         if rules == 1 { "" } else { "s" }
     );
+    if first.is_some() {
+        tracing::info!("listening on http://{listen}");
+    }
 
-    let shutdown = async move {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("installing a SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-            _ = stop_rx.changed() => {}
-        }
-        tracing::info!(
-            "stopping; waiting up to {}s for in-flight requests",
-            GRACE.as_secs()
-        );
+    let internal_task = tokio::spawn(proxlet_server::accept(
+        internal_listener,
+        engine.clone(),
+        conns.clone(),
+        Origin::Front,
+        stopped(stop_rx.clone()),
+    ));
+    spawn_watcher(&front, &engine, &state, listen.port(), &stop_rx);
+    let owner = ports::Owner {
+        binder: Box::new(move || std::net::TcpListener::bind(listen)),
+        probe: Arc::new(HostProbe {
+            front: front.clone(),
+        }),
+        engine,
+        conns: conns.clone(),
+        port: listen.port(),
+        retry: ports::RETRY,
+        hold: ports::HOLD,
     };
-    proxlet_server::serve(listener, state.engine.clone(), shutdown, GRACE).await;
+    let owner_task = tokio::spawn(owner.run(first, mode_tx, ports_rx, stopped(stop_rx.clone())));
+
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut stop_rx = stop_rx;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+        _ = stop_rx.changed() => {}
+    }
+    tracing::info!(
+        "stopping; waiting up to {}s for in-flight requests",
+        GRACE.as_secs()
+    );
+    let _ = state.stop.send(true);
+    let _ = internal_task.await;
+    let _ = owner_task.await;
+    conns.drain(GRACE).await;
+    if attached_here {
+        detach_in_foreground(&*front, &ledger);
+    }
     let _ = std::fs::remove_file(&socket);
     tracing::info!("stopped");
     Ok(())
 }
 
-fn bind_http(addr: SocketAddr) -> Result<tokio::net::TcpListener, Failure> {
+/// Follows the front server, if one is installed, to hand it the port when it starts.
+fn spawn_watcher(
+    front: &Arc<dyn FrontServer>,
+    engine: &Arc<Engine>,
+    state: &Arc<State>,
+    port: u16,
+    stop: &watch::Receiver<bool>,
+) {
+    let Some(inst) = front.detect() else {
+        return;
+    };
+    let log = front
+        .read(&inst)
+        .ok()
+        .and_then(|cfg| front.error_log(&inst, &cfg))
+        .or(inst.default_error_log);
+    let engine = engine.clone();
+    tokio::spawn(crate::watch::run(
+        front.clone(),
+        log,
+        port,
+        move || engine.snapshot().settings().attach_enabled,
+        state.mode.clone(),
+        state.ports.clone(),
+        stop.clone(),
+    ));
+}
+
+async fn stopped(mut rx: watch::Receiver<bool>) {
+    let _ = rx.wait_for(|stop| *stop).await;
+}
+
+fn foreground_attach<'a>(
+    front: &'a dyn FrontServer,
+    ledger: &Path,
+    confirm: &'a dyn Fn(&str) -> Option<bool>,
+) -> attach::Attach<'a> {
+    attach::Attach {
+        front,
+        manager: None,
+        ledger: ledger.to_owned(),
+        owner: None,
+        hook: None,
+        yes: false,
+        confirm,
+    }
+}
+
+/// `proxlet run` sets up the attach itself only when it may write the front
+/// server's config (e.g. Homebrew's, owned by the user). Returns whether it did.
+fn attach_in_foreground(
+    front: &dyn FrontServer,
+    ledger: &Path,
+    settings: &proxlet_core::Settings,
+) -> bool {
+    if !settings.attach_enabled {
+        return false;
+    }
+    let Some(inst) = front.detect() else {
+        return false;
+    };
+    let writable = front.read(&inst).is_ok_and(|cfg| {
+        cfg.http_includes
+            .first()
+            .is_some_and(|d| nix::unistd::access(&d.dir, nix::unistd::AccessFlags::W_OK).is_ok())
+    });
+    if !writable {
+        return false;
+    }
+    let confirm = crate::output::confirm;
+    match foreground_attach(front, ledger, &confirm).attach(settings) {
+        Ok(a) => {
+            match &a.outcome {
+                attach::Outcome::Attached { wrote, .. } => tracing::info!(
+                    "attached to {}{}",
+                    a.front,
+                    wrote
+                        .as_ref()
+                        .map(|w| format!(" ({})", w.display()))
+                        .unwrap_or_default()
+                ),
+                attach::Outcome::Declined { default_at } => tracing::warn!(
+                    "{} keeps its own default server at {default_at}; requests for hosts it does not serve go there",
+                    a.front
+                ),
+                _ => {}
+            }
+            matches!(
+                a.outcome,
+                attach::Outcome::Attached { .. }
+                    | attach::Outcome::AlreadyAttached
+                    | attach::Outcome::Declined { .. }
+            )
+        }
+        Err(e) => {
+            tracing::warn!("could not attach to {}: {}", front.name(), e.message);
+            false
+        }
+    }
+}
+
+fn detach_in_foreground(front: &dyn FrontServer, ledger: &Path) {
+    let confirm = |_: &str| None;
+    match foreground_attach(front, ledger, &confirm).detach() {
+        Ok(Some(warnings)) => {
+            for w in warnings {
+                tracing::warn!("{w}");
+            }
+            tracing::info!("detached from {}", front.name());
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("could not detach from {}: {}", front.name(), e.message),
+    }
+}
+
+/// Recognises the process holding the public port (design decision 6).
+struct HostProbe {
+    front: Arc<dyn FrontServer>,
+}
+
+impl ports::Probe for HostProbe {
+    fn classify(&self, port: u16, attach: bool) -> ports::Holder {
+        let holder = port::holder(port);
+        if attach {
+            let cfg = self
+                .front
+                .detect()
+                .and_then(|inst| self.front.read(&inst).ok());
+            if self.front.holds(holder.as_ref(), port, cfg.as_ref()) {
+                return ports::Holder::Front(self.front.name());
+            }
+        }
+        ports::Holder::Other(holder)
+    }
+
+    fn front_running(&self) -> bool {
+        self.front.is_running()
+    }
+}
+
+/// Binds the public listener. A taken port is not an error: the port owner
+/// waits for it. Anything else stops the server before it starts.
+fn bind_public(addr: SocketAddr) -> Result<Option<std::net::TcpListener>, Failure> {
+    let port = addr.port();
+    match std::net::TcpListener::bind(addr) {
+        Ok(l) => Ok(Some(l)),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(Failure::new(format!(
+            "binding port {port} needs elevated privileges"
+        ))
+        .hint("Run proxlet as a system service: sudo proxlet start")
+        .hint("Or use a high port: proxlet config listen.http_port 8080")),
+        Err(e) => Err(Failure::new(format!("cannot listen on {addr}: {e}"))),
+    }
+}
+
+/// Binds the loopback listener a front server forwards to.
+fn bind_internal(addr: SocketAddr) -> Result<tokio::net::TcpListener, Failure> {
     let port = addr.port();
     let listener = std::net::TcpListener::bind(addr).map_err(|e| match e.kind() {
         std::io::ErrorKind::AddrInUse => {
             let by = port::holder(port).map_or_else(String::new, |h| format!(" by {h}"));
-            Failure::new(format!("port {port} is already in use{by}")).hint(
-                "Stop whatever holds it, or move proxlet: proxlet config listen.http_port 8080",
-            )
-        }
-        std::io::ErrorKind::PermissionDenied => {
-            Failure::new(format!("binding port {port} needs elevated privileges"))
-                .hint("Run proxlet as a system service: sudo proxlet start")
-                .hint("Or use a high port: proxlet config listen.http_port 8080")
+            Failure::new(format!("the internal port {port} is already in use{by}"))
+                .hint("Pick another one: proxlet config attach.port 47081")
         }
         _ => Failure::new(format!("cannot listen on {addr}: {e}")),
     })?;
@@ -187,8 +388,9 @@ async fn handle(state: &Arc<State>, request: Request) -> Reply {
             status: Some(StatusInfo {
                 version: env!("CARGO_PKG_VERSION").into(),
                 pid: std::process::id(),
-                mode: "standalone".into(),
+                mode: state.mode.borrow().label(state.listen.port()),
                 listen: state.listen.to_string(),
+                internal: state.internal.to_string(),
                 run_by: state.run_by.clone(),
                 uptime_secs: state.started.elapsed().as_secs(),
                 rules: state.engine.snapshot().rule_count(),
@@ -220,5 +422,18 @@ async fn handle(state: &Arc<State>, request: Request) -> Reply {
             let _ = state.stop.send(true);
             Reply::ok()
         }
+        Request::Release => port_command(state, ports::Command::Release).await,
+        Request::Reclaim => port_command(state, ports::Command::Reclaim).await,
     }
+}
+
+async fn port_command(
+    state: &Arc<State>,
+    make: fn(Option<tokio::sync::oneshot::Sender<()>>) -> ports::Command,
+) -> Reply {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if state.ports.send(make(Some(tx))).await.is_err() || rx.await.is_err() {
+        return Reply::error("the server is shutting down");
+    }
+    Reply::ok()
 }

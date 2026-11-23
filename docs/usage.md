@@ -106,6 +106,8 @@ proxlet config static.listing off     # change it
 | `static.dotfiles`       | `off`     | immediately | Serve and list files whose name starts with a dot       |
 | `proxy.connect_timeout` | `5s`      | immediately | How long to wait for an upstream to accept a connection |
 | `proxy.timeout`         | `60s`     | immediately | How long to wait for an upstream to start responding    |
+| `attach.enabled`        | `on`      | immediately | Attach behind nginx when it holds or wants the port     |
+| `attach.port`           | `47080`   | on restart  | Loopback port nginx forwards to when proxlet is attached |
 
 Booleans accept `on`/`off` and `true`/`false`. Durations are a number with `ms`,
 `s` or `m`, for example `500ms`, `30s` or `2m`.
@@ -117,8 +119,11 @@ proxlet run       # in the foreground; Ctrl-C stops it gracefully
 proxlet status    # running? where? how many rules?
 ```
 
-Before listening, proxlet checks that its port is free. If it isn't, proxlet
-refuses to start and names the process that holds the port.
+If the HTTP port is free, proxlet listens on it. If nginx holds it, proxlet
+attaches behind nginx (see [Behind nginx](#behind-nginx)). If anything else
+holds it, proxlet keeps running, logs which process is in the way, and takes
+the port as soon as it is free; `proxlet status` shows
+`waiting for port 80 (held by caddy)` meanwhile.
 
 On shutdown proxlet stops accepting connections and gives in-flight requests up
 to 10 seconds to finish.
@@ -142,9 +147,11 @@ sudo proxlet stop     # stop and disable at boot; rules and settings are kept
 
 On systemd the unit gets only the capability to bind ports below 1024.
 
-If the server fails to start, for example because something else holds port 80,
-`proxlet start` shows the server's own error rather than a generic service
-failure, and stops the service so it doesn't retry in a loop.
+If the server fails to start, for example because its configuration file has a
+mistake, `proxlet start` shows the server's own error rather than a generic
+service failure, and stops the service so it doesn't retry in a loop. A port
+held by another process is not a failure: `proxlet start` warns and the server
+waits for it.
 
 Supported service managers: **systemd** (Linux). On macOS, or on Linux without
 systemd, use `proxlet run`. `proxlet stop` also stops a foreground `proxlet run`.
@@ -155,9 +162,105 @@ Installed files on systemd:
 | ----- | ------------------------------------- |
 | Unit  | `/etc/systemd/system/proxlet.service` |
 | Log   | `journalctl -u proxlet.service`       |
+| nginx hook (when attached) | `/etc/systemd/system/nginx.service.d/proxlet.conf` |
 
 The unit is regenerated on every `proxlet start`, so after upgrading or moving
 the binary just run `sudo proxlet start` again.
+
+## Behind nginx
+
+proxlet and nginx can share port 80. nginx keeps serving its own sites, and
+every request for a host nginx does not serve goes to proxlet.
+
+```sh
+sudo proxlet start          # attaches if nginx is installed
+proxlet status              # mode    attached (nginx)
+```
+
+### Who holds port 80
+
+| Situation                      | proxlet                                                        |
+| ------------------------------ | -------------------------------------------------------------- |
+| Port 80 is free                | listens on it (`standalone`)                                   |
+| nginx holds it                 | serves behind nginx on `127.0.0.1:47080` (`attached (nginx)`)  |
+| nginx starts while proxlet holds it | hands the port over; nginx starts normally                 |
+| nginx stops                    | takes port 80 back within a few seconds                        |
+| anything else holds it         | logs the holder and waits (`waiting for port 80`)              |
+
+proxlet hears about nginx starting in two ways:
+
+- **nginx as a service.** `sudo proxlet start` adds a small systemd drop-in to
+  `nginx.service`, so `systemctl start nginx` asks proxlet to release the port
+  first. The hook can never stop nginx from starting, even if proxlet is gone.
+- **nginx started by hand** (`sudo nginx`, or on macOS). proxlet follows nginx's
+  error log and releases the port when nginx fails to bind it; nginx retries
+  for about two seconds, which is plenty. If proxlet cannot read the log, it
+  watches for an nginx process to appear instead. If nginx then does not take
+  the port within 10 seconds, proxlet takes it back.
+
+`systemctl` is the reliable path; prefer it over a bare `nginx`.
+
+### What proxlet changes in nginx
+
+`sudo proxlet start` writes one file into the first directory nginx's `http`
+block includes, such as `/etc/nginx/conf.d/proxlet.conf`. It is a server block
+marked `default_server` that forwards to proxlet with the original `Host`,
+`X-Forwarded-For` and `X-Forwarded-Proto`, WebSocket upgrades, and no
+buffering.
+
+If another nginx server is already the default for port 80 (Debian and Ubuntu
+ship one), proxlet names it and asks:
+
+```text
+? nginx sends requests for hosts it does not serve to its default server at
+  /etc/nginx/sites-enabled/default:22. Make proxlet the default instead? [y/N]
+```
+
+- **Yes** (or `sudo proxlet start --yes`): proxlet removes `default_server` from
+  that line and puts it on its own block.
+- **No**, or no terminal: proxlet changes nothing in nginx, and requests for
+  hosts nginx does not serve keep going to nginx's default server.
+
+Every change is checked with `nginx -t`, written atomically, and followed by a
+reload. If any step fails, every file is put back and nginx keeps running its
+previous config.
+
+`sudo proxlet stop` undoes all of it: it removes proxlet's file and the systemd
+drop-in, restores the `default_server` flag, and reloads nginx. If you edited
+one of those lines in the meantime, proxlet leaves it alone and tells you.
+
+What proxlet changed is recorded in `front.json` in its state directory, so
+`stop` can undo it even after a crash. **Run `sudo proxlet stop` before
+uninstalling proxlet.**
+
+Without root, `proxlet run` sets up the attach only when it may write nginx's
+config (as with Homebrew on macOS), and undoes it when it exits.
+
+### Hosts nginx already serves
+
+```text
+$ proxlet add site.example 3000
+! nginx serves site.example (/etc/nginx/sites-enabled/site:3); requests for it will not reach proxlet
+? Add the rule anyway? [y/N]
+```
+
+Without a terminal, `add` refuses unless you pass `--yes`. Such rules are
+marked in `proxlet ls`:
+
+```text
+ROUTE         KIND   TARGET                 NOTE
+site.example  proxy  http://127.0.0.1:3000  served by nginx (/etc/nginx/sites-enabled/site:3)
+```
+
+In plain output (`proxlet ls | cat`) the note is a fourth tab-separated field,
+empty for other rules.
+
+### Turning it off
+
+`proxlet config attach.enabled off` makes proxlet treat nginx like any other
+process holding the port: it never reads, writes or hooks nginx's config.
+
+HTTPS (port 443) is not attached yet; it arrives with certificates.
 
 ## The configuration file
 

@@ -111,6 +111,18 @@ pub const SETTINGS: &[SettingDef] = &[
         live: true,
         help: "How long to wait for an upstream to start responding (then 504)",
     },
+    SettingDef {
+        key: "attach.enabled",
+        kind: Kind::Bool,
+        live: true,
+        help: "Attach behind nginx when it holds or wants the HTTP port",
+    },
+    SettingDef {
+        key: "attach.port",
+        kind: Kind::Port,
+        live: false,
+        help: "Loopback port nginx forwards to when proxlet is attached",
+    },
 ];
 
 /// Looks up a setting definition, suggesting the closest key on a miss.
@@ -236,6 +248,10 @@ pub struct Settings {
     pub connect_timeout: Duration,
     /// `proxy.timeout`
     pub proxy_timeout: Duration,
+    /// `attach.enabled`
+    pub attach_enabled: bool,
+    /// `attach.port`
+    pub attach_port: u16,
 }
 
 impl Default for Settings {
@@ -247,6 +263,8 @@ impl Default for Settings {
             static_dotfiles: false,
             connect_timeout: Duration::from_secs(5),
             proxy_timeout: Duration::from_secs(60),
+            attach_enabled: true,
+            attach_port: 47080,
         }
     }
 }
@@ -262,6 +280,8 @@ impl Settings {
             "static.dotfiles" => Value::Bool(self.static_dotfiles),
             "proxy.connect_timeout" => Value::Duration(self.connect_timeout),
             "proxy.timeout" => Value::Duration(self.proxy_timeout),
+            "attach.enabled" => Value::Bool(self.attach_enabled),
+            "attach.port" => Value::Port(self.attach_port),
             other => unreachable!("setting `{other}` has no field"),
         }
     }
@@ -279,6 +299,8 @@ impl Settings {
             ("static.dotfiles", Value::Bool(v)) => self.static_dotfiles = v,
             ("proxy.connect_timeout", Value::Duration(v)) => self.connect_timeout = v,
             ("proxy.timeout", Value::Duration(v)) => self.proxy_timeout = v,
+            ("attach.enabled", Value::Bool(v)) => self.attach_enabled = v,
+            ("attach.port", Value::Port(v)) => self.attach_port = v,
             (key, value) => panic!("value {value:?} does not fit setting `{key}`"),
         }
     }
@@ -302,7 +324,10 @@ mod tests {
     fn defaults() {
         let s = Settings::default();
         let shown: Vec<String> = SETTINGS.iter().map(|d| s.get(d).to_string()).collect();
-        assert_eq!(shown, ["0.0.0.0", "80", "on", "off", "5s", "1m"]);
+        assert_eq!(
+            shown,
+            ["0.0.0.0", "80", "on", "off", "5s", "1m", "on", "47080"]
+        );
         assert!(SETTINGS.iter().all(|d| !s.is_changed(d)));
     }
 

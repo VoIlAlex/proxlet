@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_proxlet");
@@ -13,6 +14,10 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_proxlet");
 pub struct Home {
     pub dir: tempfile::TempDir,
     pub port: u16,
+    /// The internal (attach) listener's port.
+    pub internal_port: u16,
+    /// A fake `nginx` script, if this home has one.
+    pub nginx: Option<PathBuf>,
 }
 
 pub struct Run {
@@ -58,9 +63,13 @@ impl Home {
         let home = Self {
             dir,
             port: free_port(),
+            internal_port: free_port(),
+            nginx: None,
         };
         home.run(&["config", "listen.address", "127.0.0.1"]).ok();
         home.run(&["config", "listen.http_port", &home.port.to_string()])
+            .ok();
+        home.run(&["config", "attach.port", &home.internal_port.to_string()])
             .ok();
         home
     }
@@ -78,8 +87,19 @@ impl Home {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(BIN);
+        self.command_as(Path::new(BIN), args)
+    }
+
+    /// Runs a copy of the binary (e.g. one named `nginx`).
+    pub fn command_as(&self, bin: &Path, args: &[&str]) -> Command {
+        let mut c = Command::new(bin);
+        // Never touch a real nginx on the machine running the tests.
+        let nginx = self
+            .nginx
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/nonexistent/nginx"));
         c.args(args)
+            .env("PROXLET_NGINX", nginx)
             .env("PROXLET_HOME", self.path())
             .env("NO_COLOR", "1")
             .env_remove("COMPLETE")
@@ -93,13 +113,21 @@ impl Home {
 
     /// Starts `proxlet run` and waits until it answers `status`.
     pub fn start(&self) -> Daemon {
+        self.start_as(Path::new(BIN))
+    }
+
+    /// Like [`Home::start`], running `bin` instead of the proxlet binary.
+    pub fn start_as(&self, bin: &Path) -> Daemon {
         let child = self
-            .command(&["run"])
+            .command_as(bin, &["run"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut daemon = Daemon { child: Some(child) };
+        let mut daemon = Daemon {
+            child: Some(child),
+            log: Arc::default(),
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.run(&["status"]).code != 0 {
             let child = daemon.child.as_mut().unwrap();
@@ -119,7 +147,39 @@ impl Home {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+        let stderr = daemon.child.as_mut().unwrap().stderr.take().unwrap();
+        let log = daemon.log.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr).lines() {
+                let Ok(line) = line else { return };
+                let mut log = log.lock().unwrap();
+                log.push_str(&line);
+                log.push('\n');
+            }
+        });
         daemon
+    }
+
+    /// Sends `GET path` to the internal (front-server) listener.
+    pub fn get_internal(&self, host: &str, path: &str) -> (u16, String) {
+        http_get(self.internal_port, host, path)
+    }
+
+    /// Polls `status` until its output contains `needle`, and returns it.
+    pub fn wait_for_status(&self, needle: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        loop {
+            let out = self.run(&["status"]).stdout;
+            if out.contains(needle) {
+                return out;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "status never showed {needle:?}:\n{out}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Sends `GET path` with `Host: host` to the server and returns (status, body).
@@ -145,6 +205,99 @@ impl Home {
     }
 }
 
+impl Home {
+    /// A home with a fake nginx: a config tree under `nginx/` and a script
+    /// that answers `-V`, `-t` (failing on the word `bogus`) and `-s reload`.
+    /// `site.example` is served on this home's HTTP port; with `default`,
+    /// another server is marked `default_server` for it.
+    pub fn with_nginx(default: bool) -> Self {
+        let mut home = Self::new();
+        let root = home.path().join("nginx");
+        std::fs::create_dir_all(root.join("conf.d")).unwrap();
+        std::fs::create_dir_all(root.join("sites-enabled")).unwrap();
+        std::fs::write(
+            root.join("nginx.conf"),
+            format!(
+                "events {{}}\nhttp {{\n    include {0}/conf.d/*.conf;\n    include {0}/sites-enabled/*;\n}}\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sites-enabled/site"),
+            format!(
+                "server {{\n    listen {};\n    server_name site.example;\n}}\n",
+                home.port
+            ),
+        )
+        .unwrap();
+        if default {
+            std::fs::write(
+                root.join("sites-enabled/default"),
+                format!(
+                    "server {{\n    listen {} default_server;\n    server_name _;\n}}\n",
+                    home.port
+                ),
+            )
+            .unwrap();
+        }
+        let script = root.join("nginx");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 ROOT='{0}'\n\
+                 case \"$1\" in\n\
+                 -V) echo 'nginx version: nginx/1.24.0' >&2\n\
+                 \x20   echo \"configure arguments: --prefix=$ROOT --conf-path=$ROOT/nginx.conf --error-log-path=$ROOT/error.log\" >&2 ;;\n\
+                 -t) if grep -rqs bogus \"$ROOT/conf.d\" \"$ROOT/sites-enabled\"; then\n\
+                 \x20     echo 'nginx: [emerg] unknown directive \"bogus\"' >&2; exit 1\n\
+                 \x20   fi ;;\n\
+                 esac\n\
+                 exit 0\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        home.nginx = Some(script);
+        home
+    }
+
+    /// Every file under the fake nginx tree (except the script), with contents.
+    pub fn nginx_tree(&self) -> Vec<(PathBuf, String)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.file_name().is_some_and(|n| n != "nginx") {
+                    out.push((p.clone(), std::fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.path().join("nginx"), &mut out);
+        out.sort();
+        out
+    }
+
+    /// A copy of the proxlet binary whose process is named `nginx`.
+    pub fn binary_named_nginx(&self) -> PathBuf {
+        let dir = self.path().join("fake-bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nginx");
+        if std::fs::hard_link(BIN, &path).is_err() {
+            std::fs::copy(BIN, &path).unwrap();
+        }
+        path
+    }
+}
+
 pub fn http_get(port: u16, host: &str, path: &str) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -165,9 +318,26 @@ pub fn http_get(port: u16, host: &str, path: &str) -> (u16, String) {
 
 pub struct Daemon {
     child: Option<Child>,
+    log: Arc<Mutex<String>>,
 }
 
 impl Daemon {
+    /// Waits until the daemon's log contains `needle`, and returns the log so far.
+    pub fn wait_for_log(&self, needle: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        loop {
+            let log = self.log.lock().unwrap().clone();
+            if log.contains(needle) {
+                return log;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "log never showed {needle:?}:\n{log}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     pub fn pid(&self) -> u32 {
         self.child.as_ref().unwrap().id()
     }

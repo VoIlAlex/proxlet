@@ -1,6 +1,7 @@
 //! Command implementations.
 
 pub mod config;
+pub mod handoff;
 pub mod rules;
 pub mod service;
 pub mod status;

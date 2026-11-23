@@ -41,6 +41,22 @@ pub fn stdout_is_terminal() -> bool {
     std::io::stdout().is_terminal()
 }
 
+/// Asks a yes/no question on the terminal. `None` when there is no terminal
+/// to ask on (stdin or stderr is not a terminal); the answer defaults to no.
+#[must_use]
+pub fn confirm(question: &str) -> Option<bool> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return None;
+    }
+    anstream::eprint!("{BOLD}?{BOLD:#} {question} [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).ok()?;
+    Some(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// A command failure: what went wrong, what to try next, and the exit code.
 #[derive(Debug)]
 pub struct Failure {
@@ -110,6 +126,8 @@ failure_from!(
     proxlet_core::SettingError,
     proxlet_core::ConfigError,
     proxlet_core::ChangeError,
+    proxlet_front::FrontError,
+    proxlet_service::ServiceError,
     std::io::Error,
 );
 

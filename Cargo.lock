@@ -736,6 +736,7 @@ dependencies = [
  "clap_complete",
  "nix",
  "proxlet-core",
+ "proxlet-front",
  "proxlet-server",
  "proxlet-service",
  "serde",
@@ -765,6 +766,14 @@ dependencies = [
 [[package]]
 name = "proxlet-front"
 version = "0.1.0"
+dependencies = [
+ "proxlet-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "proxlet-server"
@@ -794,6 +803,7 @@ dependencies = [
 name = "proxlet-service"
 version = "0.1.0"
 dependencies = [
+ "proxlet-core",
  "tempfile",
  "thiserror",
 ]
@@ -843,6 +853,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9807af0e638c12e753aa1b4e601791bf2a8f71274023c8bbeec12fc149950857"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

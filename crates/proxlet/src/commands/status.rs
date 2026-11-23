@@ -1,9 +1,10 @@
 //! `proxlet status`.
 
-use proxlet_core::Locations;
+use proxlet_core::{ConfigFile, Locations};
 
+use crate::attach;
 use crate::control;
-use crate::output::{BOLD, CmdResult, DIM, Failure, OK};
+use crate::output::{self, BOLD, CmdResult, DIM, Failure, OK};
 
 /// Exit code when proxlet is not running (as in LSB `status`).
 pub const NOT_RUNNING: u8 = 3;
@@ -24,7 +25,7 @@ pub fn run(locations: &Locations) -> CmdResult {
     anstream::println!("{OK}●{OK:#} proxlet is {BOLD}running{BOLD:#}");
     let rows = [
         ("mode", s.mode.clone()),
-        ("listen", format!("http://{}", s.listen)),
+        ("listen", listen_line(&s)),
         ("run by", run_by),
         ("uptime", uptime(s.uptime_secs)),
         ("rules", s.rules.to_string()),
@@ -33,7 +34,40 @@ pub fn run(locations: &Locations) -> CmdResult {
     for (k, v) in rows {
         anstream::println!("  {DIM}{k:<8}{DIM:#}{v}");
     }
+    if let Some(front) = s
+        .mode
+        .strip_prefix("attached (")
+        .and_then(|m| m.strip_suffix(')'))
+        && !front_forwards(locations)
+    {
+        output::warn(format!("{front} is not forwarding to proxlet yet"));
+        output::note("Set it up with: sudo proxlet start");
+    }
     Ok(())
+}
+
+/// Whether the front server's config has proxlet's block. Unknown counts as yes.
+fn front_forwards(locations: &Locations) -> bool {
+    let Ok((_, config)) = ConfigFile::new(locations.config_file()).read() else {
+        return true;
+    };
+    attach::front_config(&config.settings).is_none_or(|(_, cfg)| cfg.has_managed_block())
+}
+
+/// Where requests reach proxlet, given its mode.
+fn listen_line(s: &control::StatusInfo) -> String {
+    let port = s.listen.rsplit(':').next().unwrap_or("80");
+    if let Some(front) = s
+        .mode
+        .strip_prefix("attached (")
+        .and_then(|m| m.strip_suffix(')'))
+    {
+        return format!("http://{} (behind {front} on port {port})", s.internal);
+    }
+    if s.mode == "standalone" || s.internal.is_empty() {
+        return format!("http://{}", s.listen);
+    }
+    format!("http://{} (port {port} not available yet)", s.internal)
 }
 
 fn uptime(secs: u64) -> String {
@@ -48,7 +82,34 @@ fn uptime(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::uptime;
+    use super::{listen_line, uptime};
+    use crate::control::StatusInfo;
+
+    fn info(mode: &str) -> StatusInfo {
+        StatusInfo {
+            version: "0".into(),
+            pid: 1,
+            mode: mode.into(),
+            listen: "0.0.0.0:80".into(),
+            internal: "127.0.0.1:47080".into(),
+            run_by: "foreground".into(),
+            uptime_secs: 0,
+            rules: 0,
+        }
+    }
+
+    #[test]
+    fn listen_line_follows_the_mode() {
+        assert_eq!(listen_line(&info("standalone")), "http://0.0.0.0:80");
+        assert_eq!(
+            listen_line(&info("attached (nginx)")),
+            "http://127.0.0.1:47080 (behind nginx on port 80)"
+        );
+        assert_eq!(
+            listen_line(&info("waiting for port 80 (held by caddy)")),
+            "http://127.0.0.1:47080 (port 80 not available yet)"
+        );
+    }
 
     #[test]
     fn uptime_is_short() {

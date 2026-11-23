@@ -76,19 +76,131 @@ jobs:
           if curl -fsS http://127.0.0.1/site/; then echo "still serving after stop"; exit 1; fi
           "$P" ls | grep -q "^/site"
           sudo "$P" stop | grep -q "not running"
-      - name: a failed start is explained
+      - name: a taken port means waiting, then taking it
         run: |
           set -euxo pipefail
           P="$PWD/target/debug/proxlet"
           sudo python3 -m http.server 80 --bind 0.0.0.0 >/dev/null 2>&1 &
           sleep 1
-          if out=$(sudo "$P" start 2>&1); then echo "start succeeded on a taken port"; exit 1; fi
+          out=$(sudo "$P" start 2>&1)
           echo "$out"
-          echo "$out" | grep -q "port 80 is already in use"
+          echo "$out" | grep -q "waiting for port 80"
+          "$P" status | grep -q "waiting for port 80"
+          sudo pkill -f "http.server 80"
+          for i in $(seq 50); do "$P" status | grep -q "mode    standalone" && break; sleep 0.2; done
+          "$P" status | grep -q "mode    standalone"
+          curl -fsS http://127.0.0.1/site/ | grep -q "hello from proxlet"
+          sudo "$P" stop
+      - name: a failed start is explained
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          CONFIG="$HOME/.config/proxlet/proxlet.toml"
+          cp "$CONFIG" /tmp/proxlet.toml.bak
+          printf 'listen = = broken\n' >> "$CONFIG"
+          if out=$(sudo "$P" start 2>&1); then echo "start succeeded with a broken config"; exit 1; fi
+          echo "$out"
+          echo "$out" | grep -q "proxlet.toml"
           if systemctl is-enabled proxlet.service; then echo "left enabled after failure"; exit 1; fi
+          cp /tmp/proxlet.toml.bak "$CONFIG"
       - name: service log
         if: failure()
         run: sudo journalctl -u proxlet.service --no-pager -n 100
+
+  nginx:
+    name: nginx attach (end to end)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: install nginx, which takes port 80
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q nginx
+          # The runner image ships nginx with its service disabled.
+          sudo systemctl enable --now nginx
+          systemctl is-active nginx
+          printf 'server {\n    listen 80;\n    server_name site.test;\n    return 200 "from nginx\\n";\n}\n' \
+            | sudo tee /etc/nginx/sites-enabled/site
+          sudo nginx -t
+          sudo systemctl reload nginx
+          sudo cp -a /etc/nginx /tmp/nginx-before
+      - name: start attaches behind nginx
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          mkdir -p "$HOME/site"
+          echo "hello from proxlet" > "$HOME/site/index.html"
+          "$P" add /site "$HOME/site"
+          "$P" add /ws 9001
+          sudo "$P" start --yes
+          for i in $(seq 50); do "$P" status | grep -q "attached (nginx)" && break; sleep 0.2; done
+          "$P" status | tee /dev/stderr | grep -q "mode    attached (nginx)"
+          test -f /etc/nginx/conf.d/proxlet.conf
+          test -f /etc/systemd/system/nginx.service.d/proxlet.conf
+          # Only active lines: the file also has commented-out `# listen 443 ssl default_server;`.
+          if grep -Eq '^[[:space:]]*listen[^#]*default_server' /etc/nginx/sites-available/default; then exit 1; fi
+          # Unclaimed host: proxlet. Claimed host: nginx.
+          curl -fsS -H 'Host: other.test' http://127.0.0.1/site/ | grep -q "hello from proxlet"
+          curl -fsS -H 'Host: site.test' http://127.0.0.1/ | grep -q "from nginx"
+          curl -s -H 'Host: other.test' http://127.0.0.1/nope | grep -q "proxlet"
+      - name: websocket through nginx
+        run: |
+          set -euxo pipefail
+          python3 .github/scripts/ws_echo.py serve 9001 &
+          sleep 1
+          python3 .github/scripts/ws_echo.py send 127.0.0.1 80 other.test /ws hello-ws | grep -qx hello-ws
+      - name: nginx stops and starts as a service
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          sudo systemctl stop nginx
+          for i in $(seq 25); do "$P" status | grep -q "mode    standalone" && break; sleep 0.2; done
+          "$P" status | grep -q "mode    standalone"
+          curl -fsS http://127.0.0.1/site/ | grep -q "hello from proxlet"
+          sudo systemctl start nginx
+          systemctl is-active nginx
+          for i in $(seq 50); do "$P" status | grep -q "attached (nginx)" && break; sleep 0.2; done
+          "$P" status | grep -q "mode    attached (nginx)"
+          curl -fsS -H 'Host: other.test' http://127.0.0.1/site/ | grep -q "hello from proxlet"
+      - name: nginx started by hand
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          sudo systemctl stop nginx
+          for i in $(seq 25); do "$P" status | grep -q "mode    standalone" && break; sleep 0.2; done
+          sudo nginx
+          for i in $(seq 50); do "$P" status | grep -q "attached (nginx)" && break; sleep 0.2; done
+          "$P" status | grep -q "mode    attached (nginx)"
+          curl -fsS -H 'Host: other.test' http://127.0.0.1/site/ | grep -q "hello from proxlet"
+          sudo nginx -s quit
+          for i in $(seq 50); do "$P" status | grep -q "mode    standalone" && break; sleep 0.2; done
+          sudo systemctl start nginx
+      - name: a host nginx serves needs confirmation
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          if "$P" add site.test 3000 < /dev/null; then echo "added without confirmation"; exit 1; fi
+          "$P" add site.test 3000 --yes
+          "$P" ls | grep "^site.test" | grep -q "served by nginx (/etc/nginx/sites-enabled/site:3)"
+          "$P" rm site.test
+      - name: stop restores nginx exactly
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          sudo "$P" stop
+          sudo diff -r /tmp/nginx-before /etc/nginx
+          test ! -e /etc/systemd/system/nginx.service.d/proxlet.conf
+          sudo nginx -t
+          if curl -s -H 'Host: other.test' http://127.0.0.1/ | grep -q proxlet; then exit 1; fi
+      - name: logs
+        if: failure()
+        run: |
+          sudo journalctl -u proxlet.service -u nginx.service --no-pager -n 200
+          sudo tail -n 50 /var/log/nginx/error.log
 
   msrv:
     name: msrv (1.89)

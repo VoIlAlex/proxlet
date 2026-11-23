@@ -1,6 +1,8 @@
 //! The command-line interface definition.
 
-use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, PathCompleter};
 
 use crate::complete;
@@ -18,7 +20,11 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Install and start the proxlet system service
-    Start,
+    Start {
+        /// Make proxlet nginx's default server without asking
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Stop the proxlet system service
     Stop,
     /// Run the server in the foreground (what the system service executes)
@@ -36,6 +42,9 @@ pub enum Command {
         /// Where they go: a local port (`8000`), `host:port`, a URL, or a directory (`.`)
         #[arg(add = ArgValueCompleter::new(PathCompleter::dir()))]
         target: String,
+        /// Add it even if nginx already serves the host, without asking
+        #[arg(long, short)]
+        yes: bool,
     },
     /// Remove a rule
     Rm {
@@ -71,6 +80,24 @@ pub enum Command {
         #[arg(add = ArgValueCompleter::new(complete::setting_values))]
         value: Option<String>,
     },
+    /// Hand the HTTP port to a front server, or take it back (used by service hooks)
+    #[command(hide = true)]
+    Handoff {
+        /// `release` before the front server starts, `reclaim` after it stops
+        action: HandoffAction,
+        /// The daemon's control socket, when running as another user
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
+/// What `proxlet handoff` asks the daemon to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HandoffAction {
+    /// Let go of the HTTP port.
+    Release,
+    /// Take the HTTP port back.
+    Reclaim,
 }
 
 #[cfg(test)]
@@ -87,7 +114,7 @@ mod tests {
     fn add_parses_route_and_target() {
         let cli = Cli::try_parse_from(["proxlet", "add", "example.com/api", "8002"]).unwrap();
         match cli.command {
-            Command::Add { route, target } => {
+            Command::Add { route, target, .. } => {
                 assert_eq!(route, "example.com/api");
                 assert_eq!(target, "8002");
             }

@@ -12,9 +12,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 
-use crate::Body;
 use crate::response;
 use crate::snapshot::ProxyTarget;
+use crate::{Body, Origin};
 
 /// The pooled client used for every upstream.
 pub(crate) type UpstreamClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
@@ -79,7 +79,19 @@ fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) {
     }
 }
 
-fn set_forwarded(headers: &mut HeaderMap, peer: SocketAddr, host: Option<&str>) {
+fn set_forwarded(headers: &mut HeaderMap, peer: SocketAddr, origin: Origin, host: Option<&str>) {
+    if origin == Origin::Front && headers.contains_key("x-forwarded-for") {
+        // The front server already recorded the client; the loopback hop adds nothing.
+        if !headers.contains_key("x-forwarded-proto") {
+            headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        }
+        if !headers.contains_key("x-forwarded-host")
+            && let Some(v) = host.and_then(|h| HeaderValue::from_str(h).ok())
+        {
+            headers.insert("x-forwarded-host", v);
+        }
+        return;
+    }
     let ip = peer.ip().to_canonical().to_string();
     let xff = match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         Some(prev) if !prev.trim().is_empty() => format!("{prev}, {ip}"),
@@ -119,6 +131,7 @@ pub(crate) async fn forward(
     timeout: Duration,
     target: &ProxyTarget,
     peer: SocketAddr,
+    origin: Origin,
     host: Option<String>,
     mut req: Request<Incoming>,
 ) -> Response<Body> {
@@ -146,7 +159,7 @@ pub(crate) async fn forward(
     {
         parts.headers.insert(header::HOST, v);
     }
-    set_forwarded(&mut parts.headers, peer, host.as_deref());
+    set_forwarded(&mut parts.headers, peer, origin, host.as_deref());
     let upstream_req = Request::from_parts(parts, body.map_err(Into::into).boxed());
 
     let upstream = target.authority.as_str();
@@ -236,6 +249,7 @@ mod tests {
         set_forwarded(
             &mut h,
             "203.0.113.7:5000".parse().unwrap(),
+            Origin::Direct,
             Some("example.com"),
         );
         assert_eq!(h["x-forwarded-for"], "10.0.0.1, 203.0.113.7");
@@ -244,9 +258,30 @@ mod tests {
     }
 
     #[test]
+    fn front_server_headers_are_kept() {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+        h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        set_forwarded(
+            &mut h,
+            "127.0.0.1:5000".parse().unwrap(),
+            Origin::Front,
+            Some("example.com"),
+        );
+        assert_eq!(h["x-forwarded-for"], "203.0.113.7");
+        assert_eq!(h["x-forwarded-proto"], "https");
+        assert_eq!(h["x-forwarded-host"], "example.com");
+    }
+
+    #[test]
     fn ipv4_mapped_peer_is_shown_as_ipv4() {
         let mut h = HeaderMap::new();
-        set_forwarded(&mut h, "[::ffff:203.0.113.7]:5000".parse().unwrap(), None);
+        set_forwarded(
+            &mut h,
+            "[::ffff:203.0.113.7]:5000".parse().unwrap(),
+            Origin::Direct,
+            None,
+        );
         assert_eq!(h["x-forwarded-for"], "203.0.113.7");
     }
 }
