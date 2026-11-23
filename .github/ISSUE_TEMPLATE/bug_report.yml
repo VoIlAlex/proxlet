@@ -1,0 +1,43 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you ran, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      render: sh
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: proxlet version
+      description: Output of `proxlet --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [Standalone, Attached to nginx, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: Ubuntu 24.04, macOS 15, ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Output of `proxlet status` and `proxlet logs --all`. Remove anything private.
+      render: text

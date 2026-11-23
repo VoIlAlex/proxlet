@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  proxlet is a Rust reverse proxy and HTTP server driven entirely from its CLI.
+  It runs standalone or attached behind an existing front server (nginx first).
+
+  Constraints every artifact must respect:
+  - Supported platforms are Linux and macOS only.
+  - Attach mode is "thin": the front server gets one catch-all that forwards
+    unclaimed traffic to proxlet; routing, logs and stats always live in proxlet.
+  - Three areas are extension points, each behind one trait in its own crate,
+    and a new integration must not require changes to the engine or to other
+    integrations: front servers (proxlet-front), service managers
+    (proxlet-service, systemd first), AI tools (proxlet-ai).
+  - Every mutation (rule, setting, certificate, front-server config) is
+    validated before anything is written, written atomically, and rolled back
+    if applying it fails. A bad change must never take the server down.
+  - Rule and setting changes apply live, without dropping in-flight requests.
+  - Every command, flag and argument value (rules, domains, ports, setting
+    names) must tab-complete.
+  - Performance is a feature: no blocking work on the request path, and the
+    proxy path must stream bodies rather than buffer them.
+  - CLI output is for humans first: short, specific errors that say what to do
+    next. Output must stay grep-friendly when stdout is not a terminal.
+
+rules:
+  proposal:
+    - State what is explicitly out of scope and which later change owns it
+  specs:
+    - Specify CLI behaviour with the exact command and the observable output or exit status
+  tasks:
+    - Each task group must leave `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test --workspace` passing

@@ -1,0 +1,19 @@
+[package]
+name = "proxlet"
+description = "A tiny, fast reverse proxy and HTTP server that runs standalone or attaches to nginx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+clap = { version = "4.6.9", features = ["derive"] }
+clap_complete = { version = "4.6.12", features = ["unstable-dynamic"] }
+
+[lints]
+workspace = true
