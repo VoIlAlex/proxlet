@@ -8,9 +8,9 @@
 
 ## 2. Certificate store (new crate proxlet-cert)
 
-- [ ] 2.1 Create `proxlet-cert` with workspace lints and docs, depending on `proxlet-core`, `rcgen` (`ring`, `pem`) and `x509-parser`; add the public-name check from "Checks before issuance" (IP, `localhost`, reserved suffixes, label syntax); verify with unit tests for each rejected kind and for valid names
-- [ ] 2.2 Add the store (decision 2): one `<domain>.pem` holding the chain and key plus `<domain>.json`, with `load_all`, `get`, `put` (validate key against leaf, names and dates, then atomic rename; mode `0600`), `remove`, and renewal-state updates; verify with tests for a round trip, a mismatched key rejected while the old file stays, permissions, and a crash mid-write (temp file left, store still valid)
-- [ ] 2.3 Add a fake CA for tests that signs leafs with any validity period using `rcgen`, exported behind a `test-support` feature; verify that the store accepts its output and reports the chosen expiry
+- [x] 2.1 Create `proxlet-cert` with workspace lints and docs, depending on `proxlet-core`, `rcgen` (`ring`, `pem`) and `x509-parser`; add the public-name check from "Checks before issuance" (IP, `localhost`, reserved suffixes, label syntax); verify with unit tests for each rejected kind and for valid names
+- [x] 2.2 Add the store (decision 2): one `<domain>.pem` holding the chain and key plus `<domain>.json`, with `load_all`, `get`, `put` (validate key against leaf, names and dates, then atomic rename; mode `0600`), `remove`, and renewal-state updates; verify with tests for a round trip, a mismatched key rejected while the old file stays, permissions, and a crash mid-write (temp file left, store still valid)
+- [x] 2.3 Add a fake CA for tests that signs leafs with any validity period using `rcgen`, exported behind a `test-support` feature; verify that the store accepts its output and reports the chosen expiry
 
 ## 3. ACME client (proxlet-cert)
 
