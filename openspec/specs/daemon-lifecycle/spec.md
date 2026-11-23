@@ -7,7 +7,6 @@ installed as a system service, and what it checks before it starts listening.
 
 ## Requirements
 
-
 ### Requirement: Foreground run
 
 `proxlet run` SHALL run the server in the foreground until interrupted. On an
@@ -21,19 +20,32 @@ requests finish within a bounded grace period, and exit zero.
 
 ### Requirement: Port check on start
 
-Before listening, the server SHALL check that its HTTP port is free. If the port
-is taken it SHALL NOT start, and SHALL exit non-zero with an error naming the port
-and, where it can be determined, the process holding it.
+The server SHALL listen on its HTTP port when the port is free. When nginx holds
+it and attach is enabled, the server SHALL attach behind nginx. When any other
+process holds it, the server SHALL keep running, log an error naming the port and
+the holder, and retry until the port is free. A second proxlet SHALL still exit
+non-zero.
 
 #### Scenario: Port free
 
 - **WHEN** the HTTP port is free and the server is started
 - **THEN** it begins listening on that port
 
+#### Scenario: Port held by nginx
+
+- **WHEN** nginx is listening on the HTTP port and the server is started
+- **THEN** the server listens on `127.0.0.1:<attach.port>` and `proxlet status` shows `mode    attached (nginx)`
+
 #### Scenario: Port taken
 
-- **WHEN** another process is listening on the HTTP port and the server is started
-- **THEN** it exits non-zero and the error names the port and the process that holds it
+- **WHEN** another process is listening on the HTTP port and `proxlet run` is started
+- **THEN** the server keeps running, logs `port 80 is already in use by <name> (pid <pid>); waiting for it to be free`, and `proxlet status` shows `mode    waiting for port 80 (held by <name>)`
+
+#### Scenario: Port freed while waiting
+
+- **GIVEN** the server is waiting for its HTTP port
+- **WHEN** the holder stops listening
+- **THEN** the server listens on the port within 5 seconds and serves its rules
 
 #### Scenario: A second proxlet
 
@@ -57,10 +69,15 @@ already running SHALL succeed and say so.
 - **WHEN** the service is running and the user runs `proxlet start`
 - **THEN** the command says proxlet is already running and exits zero
 
+#### Scenario: Start on a taken port
+
+- **WHEN** a process other than nginx holds port 80 and the user runs `sudo proxlet start`
+- **THEN** the service is running, the command warns `waiting for port 80, held by <name> (pid <pid>)`, and exits zero
+
 #### Scenario: Start fails
 
-- **WHEN** the user runs `proxlet start` and the server cannot start because its port is taken
-- **THEN** the command exits non-zero and shows the server's error, not only a generic service failure
+- **WHEN** the user runs `proxlet start` and the server cannot start because its config file is invalid
+- **THEN** the command exits non-zero and shows the server's error, including the file and line, not only a generic service failure
 
 ### Requirement: Unsupported service manager
 
@@ -113,14 +130,19 @@ service is not running SHALL succeed and say so.
 ### Requirement: Status
 
 `proxlet status` SHALL report whether the server is running. When running it
-SHALL show the mode (standalone), the listening address, how it is run (system
-service or foreground), the uptime and the number of rules. It SHALL exit zero
-when the server is running and non-zero when it is not.
+SHALL show the mode (`standalone`, `attached (nginx)` or `waiting for port <n>
+(held by <name>)`), the listening address, how it is run, the uptime and the
+number of rules. It SHALL exit zero when running and non-zero when not.
 
 #### Scenario: Running standalone
 
 - **WHEN** the server is running and the user runs `proxlet status`
 - **THEN** the output shows running, standalone, the listening address, uptime and rule count, and the command exits zero
+
+#### Scenario: Running behind nginx
+
+- **WHEN** the server is attached behind nginx and the user runs `proxlet status`
+- **THEN** the output shows `mode    attached (nginx)` and `listen  http://127.0.0.1:<attach.port> (behind nginx on port 80)`, and the command exits zero
 
 #### Scenario: Not running
 
