@@ -141,7 +141,8 @@ jobs:
           "$P" status | tee /dev/stderr | grep -q "mode    attached (nginx)"
           test -f /etc/nginx/conf.d/proxlet.conf
           test -f /etc/systemd/system/nginx.service.d/proxlet.conf
-          if grep -q default_server /etc/nginx/sites-available/default; then exit 1; fi
+          # Only active lines: the file also has commented-out `# listen 443 ssl default_server;`.
+          if grep -Eq '^[[:space:]]*listen[^#]*default_server' /etc/nginx/sites-available/default; then exit 1; fi
           # Unclaimed host: proxlet. Claimed host: nginx.
           curl -fsS -H 'Host: other.test' http://127.0.0.1/site/ | grep -q "hello from proxlet"
           curl -fsS -H 'Host: site.test' http://127.0.0.1/ | grep -q "from nginx"
