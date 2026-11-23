@@ -7,8 +7,9 @@ A tiny, fast reverse proxy and HTTP server written in Rust. One command to route
 a path or a domain to a local port or a folder. It runs on its own, or attaches
 to an nginx that already owns ports 80 and 443.
 
-> **Status: early development.** The command surface below is settled; the
-> behaviour behind it is being built change by change. See [Roadmap](#roadmap).
+> **Status: early development.** Rules, proxying, static files, settings and
+> the foreground server work today; the rest of the commands below are being
+> built change by change. See [Roadmap](#roadmap).
 
 ## What it looks like
 
@@ -34,6 +35,9 @@ proxlet config static.listing off  # change a setting
 Every change is validated before it is written and applied, so a bad rule never
 takes the server down. Everything on the command line tab-completes.
 
+**[Read the usage guide →](docs/usage.md)** for routes, targets, matching,
+settings and where proxlet keeps its files.
+
 ## How it works
 
 - **Standalone:** proxlet listens on 80/443 itself.
@@ -56,12 +60,26 @@ cargo install --path crates/proxlet
 
 Supported platforms: Linux and macOS.
 
+Try it without touching port 80:
+
+```sh
+proxlet config listen.http_port 8080
+proxlet add /files .
+proxlet run          # then open http://localhost:8080/files/
+```
+
+Enable tab completion (zsh shown; bash and fish are in the [usage guide](docs/usage.md#shell-completion)):
+
+```sh
+echo 'source <(COMPLETE=zsh proxlet)' >> ~/.zshrc
+```
+
 ## Roadmap
 
 Work is specified with [OpenSpec](https://github.com/Fission-AI/OpenSpec) under
 [`openspec/`](openspec/), one change per slice:
 
-1. **Core** — rules, standalone serving (proxy + static files), `start`/`stop`/`status`, `config`
+1. **Core** — rules, standalone serving (proxy + static files), `start`/`stop`/`status`, `config` *(in progress)*
 2. **Logs** — structured access and error logs, `proxlet logs`
 3. **nginx attach** — detection, catch-all install, conflict warnings
 4. **Certificates** — Let's Encrypt issuance and renewal, HTTPS

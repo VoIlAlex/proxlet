@@ -9,3 +9,12 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+nix = { version = "0.32.0", default-features = false, features = ["user"] }
+thiserror = "2.0.21"
+toml_edit = "0.25.20"
+
+[dev-dependencies]
+proptest = "1.12.0"
+tempfile = "3.27.0"

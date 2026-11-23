@@ -9,3 +9,32 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+arc-swap = "1.9.5"
+bytes = "1.12.2"
+futures-util = { version = "0.3.34", default-features = false }
+http = "1.5.0"
+http-body-util = "0.1.5"
+httpdate = "1.0.3"
+hyper = { version = "1.12.0", features = ["server", "client", "http1", "http2"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "ring", "webpki-roots", "tls12"] }
+hyper-util = { version = "0.1.21", features = ["server", "server-auto", "server-graceful", "client-legacy", "tokio", "http1", "http2"] }
+mime_guess = "2.0.5"
+percent-encoding = "2.3.2"
+proxlet-core = { version = "0.1.0", path = "../proxlet-core" }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "time", "fs", "io-util", "sync"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+bytes = "1.12.2"
+futures-util = "0.3.34"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+tokio-tungstenite = "0.30.0"
