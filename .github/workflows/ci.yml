@@ -265,7 +265,8 @@ jobs:
           "$P" config listen.https_port 5443
           "$P" config cert.server https://localhost:14000/dir
           "$P" add app.example.org "$HOME/site"
-          "$P" add /ws 9001
+          # A host rule beats hostless ones, so the WebSocket route names the host too.
+          "$P" add app.example.org/ws 9001
           "$P" run > /tmp/proxlet.log 2>&1 &
           for i in $(seq 50); do "$P" status > /dev/null && break; sleep 0.2; done
           "$P" cert app.example.org --yes | tee /dev/stderr | grep -q "✓ Certificate for app.example.org, valid until"
