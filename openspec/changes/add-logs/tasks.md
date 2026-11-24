@@ -28,7 +28,7 @@
 
 ## 5. End to end and release notes
 
-- [ ] 5.1 Extend the CI `systemd` job: after requests to the running service, `proxlet logs --all` shows them and an event, and `proxlet logs /site --all --json | python3 -m json.tool` parses; verify that the job passes
+- [x] 5.1 Extend the CI `systemd` job: after requests to the running service, `proxlet logs --all` shows them and an event, and `proxlet logs /site --all --json | python3 -m json.tool` parses; verify that the job passes
 - [x] 5.2 Update `README.md` (status, roadmap) and `CHANGELOG.md`, and write `verification.md` mapping every scenario to its test; verify with `openspec validate add-logs --strict`
 
 ## Workflow follow-up
