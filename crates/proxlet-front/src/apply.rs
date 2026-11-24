@@ -78,6 +78,17 @@ pub struct Ledger {
     /// The service unit proxlet hooked, if any.
     #[serde(default)]
     pub hooked_unit: Option<String>,
+    /// The HTTPS port proxlet's block listens on, when HTTPS is forwarded.
+    /// Ledgers from before HTTPS forwarding have none.
+    #[serde(default)]
+    pub https_port: Option<u16>,
+    /// Where the front server reads proxlet's certificates, when HTTPS is
+    /// forwarded; `stop` removes it if proxlet created it.
+    #[serde(default)]
+    pub cert_dir: Option<std::path::PathBuf>,
+    /// Whether proxlet created `cert_dir` (and so may remove it).
+    #[serde(default)]
+    pub cert_dir_created: bool,
     /// The config changes, in the order they were made.
     pub entries: Vec<Entry>,
 }
@@ -428,10 +439,14 @@ mod tests {
         fn read(&self, _: &Installation) -> Result<FrontConfig, FrontError> {
             Ok(FrontConfig::default())
         }
+        fn https_support(&self, _: &Installation) -> Result<(), String> {
+            Ok(())
+        }
         fn plan_attach(
             &self,
             _: &FrontConfig,
             _: u16,
+            _: Option<&crate::HttpsForward>,
             _: SocketAddr,
             _: bool,
         ) -> Result<Plan, FrontError> {
@@ -505,6 +520,7 @@ mod tests {
             conf_path: "/x".into(),
             prefix: "/".into(),
             default_error_log: None,
+            ssl: true,
         }
     }
 
@@ -678,11 +694,29 @@ mod tests {
             port: 80,
             internal: "127.0.0.1:47080".into(),
             hooked_unit: Some("nginx.service".into()),
+            https_port: Some(443),
+            cert_dir: Some("/var/lib/proxlet/nginx-certs".into()),
+            cert_dir_created: true,
             entries: prepare(&t.steps("server {}\n")).unwrap(),
         };
         let path = t.p("front.json");
         assert_eq!(Ledger::load(&path).unwrap(), None);
         ledger.save(&path).unwrap();
         assert_eq!(Ledger::load(&path).unwrap(), Some(ledger));
+    }
+
+    #[test]
+    fn a_ledger_from_before_https_reads_as_port_80_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("front.json");
+        std::fs::write(
+            &path,
+            r#"{"front":"nginx","port":80,"internal":"127.0.0.1:47080","entries":[]}"#,
+        )
+        .unwrap();
+        let ledger = Ledger::load(&path).unwrap().unwrap();
+        assert_eq!(ledger.https_port, None);
+        assert_eq!(ledger.cert_dir, None);
+        assert!(!ledger.cert_dir_created);
     }
 }

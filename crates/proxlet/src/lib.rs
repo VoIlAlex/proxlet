@@ -4,6 +4,7 @@
 //! behind `main` so integration tests can drive it.
 
 pub mod attach;
+pub mod certs;
 pub mod cli;
 pub mod commands;
 pub mod complete;
@@ -20,7 +21,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use proxlet_core::Locations;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{CertAction, Cli, Command};
 use crate::output::{CmdResult, Failure};
 
 /// Entry point for the `proxlet` binary.
@@ -71,7 +72,16 @@ fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
             commands::handoff::run(locations, *action, socket.as_deref())
         }
         Command::Logs { .. } => not_yet("logs", "structured logs"),
-        Command::Cert { .. } => not_yet("cert", "certificates"),
+        Command::Cert {
+            action,
+            domains,
+            yes,
+        } => match action {
+            None => commands::cert::issue(locations, domains, *yes),
+            Some(CertAction::Ls) => commands::cert::ls(locations),
+            Some(CertAction::Rm { domains }) => commands::cert::rm(locations, domains),
+            Some(CertAction::Renew { domains }) => commands::cert::renew(locations, domains),
+        },
         Command::Monitor => not_yet("monitor", "monitor"),
         Command::Ai => not_yet("ai", "AI tools"),
     }

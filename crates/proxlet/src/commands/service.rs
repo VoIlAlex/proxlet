@@ -42,6 +42,9 @@ pub struct Host {
     pub front: Option<Box<dyn FrontServer>>,
     /// Asks a yes/no question; `None` when there is no terminal.
     pub confirm: Box<Confirm>,
+    /// Where `start` creates the directory nginx's workers read
+    /// certificates from; `None` uses proxlet's own store.
+    pub publish_dir: Option<PathBuf>,
 }
 
 impl Host {
@@ -68,6 +71,7 @@ impl Host {
             poll: Duration::from_millis(200),
             front: Some(attach::system_front()),
             confirm: Box::new(output::confirm),
+            publish_dir: is_root.then(|| PathBuf::from(attach::PUBLISH_DIR)),
         }
     }
 
@@ -92,6 +96,12 @@ impl Host {
                 before_start: argv("release"),
                 after_stop: argv("reclaim"),
             }),
+            cert_dir: match &self.publish_dir {
+                Some(dir) => attach::CertDir::Create(dir.clone()),
+                None => attach::CertDir::Existing(
+                    crate::commands::cert::store(locations).dir().to_owned(),
+                ),
+            },
             yes,
             confirm: &*self.confirm,
         })
@@ -111,6 +121,29 @@ impl Host {
     }
 }
 
+/// The warning when another process holds the HTTPS port, with `pid` the
+/// holder's process id if known.
+fn https_waiting(s: &StatusInfo, pid: impl FnOnce(u16) -> Option<u32>) -> Option<String> {
+    let port = s.https_listen.rsplit(':').next().unwrap_or("443");
+    let reason = s
+        .https_mode
+        .strip_prefix(&format!("waiting for port {port} ("))
+        .and_then(|r| r.strip_suffix(')'))?;
+    let pid = port.parse().ok().and_then(pid);
+    Some(format!(
+        "waiting for port {port}, {reason}{}",
+        pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+    ))
+}
+
+/// Warns when another process holds the HTTPS port.
+fn warn_https_waiting(s: &StatusInfo) {
+    if let Some(w) = https_waiting(s, |p| proxlet_core::port::holder(p).map(|h| h.pid)) {
+        output::warn(w);
+        output::note("HTTPS starts as soon as the port is free; plain HTTP works meanwhile");
+    }
+}
+
 /// The numeric ids of a service user.
 fn owner_ids(run_as: &RunAs) -> Option<(u32, u32)> {
     let user = nix::unistd::User::from_name(&run_as.user).ok().flatten()?;
@@ -123,6 +156,7 @@ fn report_attach(a: &Attached) {
         Outcome::Attached {
             wrote,
             moved_default,
+            kept_default,
         } => {
             output::success(format!(
                 "Attached to {}: requests for hosts it does not serve now reach proxlet",
@@ -134,6 +168,13 @@ fn report_attach(a: &Attached) {
             for at in moved_default {
                 output::note(format!("Moved default_server from {at} to proxlet's block"));
             }
+            for at in kept_default {
+                output::warn(format!(
+                    "{} keeps its own default server at {at}; requests on that port for hosts \
+                     it does not serve go there, not to proxlet",
+                    a.front
+                ));
+            }
         }
         Outcome::Declined { default_at } => {
             output::warn(format!(
@@ -144,6 +185,9 @@ fn report_attach(a: &Attached) {
             output::note("To make proxlet the default instead: sudo proxlet start --yes");
         }
         Outcome::AlreadyAttached | Outcome::Disabled | Outcome::NoFront => {}
+    }
+    if let Some(why) = &a.https_skipped {
+        output::warn(format!("HTTPS is not forwarded to proxlet: {why}"));
     }
 }
 
@@ -212,6 +256,10 @@ pub fn start_with(host: &Host, locations: &Locations, yes: bool) -> CmdResult {
         report_attach(a);
     }
     if let Some(s) = running {
+        // Let the running server publish certificates for the front server
+        // and notice that HTTPS is now forwarded.
+        let _ =
+            Client::connect(&locations.socket()).and_then(|mut c| c.call(&Request::CertsChanged));
         output::success(format!("proxlet is already running ({})", describe(&s)));
         return Ok(());
     }
@@ -268,7 +316,9 @@ fn install_and_wait(
 
     let result = host.wait_for(|| {
         if let Some(s) = (host.probe)() {
-            if s.mode.contains(crate::ports::CHECKING) {
+            if s.mode.contains(crate::ports::CHECKING)
+                || s.https_mode.contains(crate::ports::CHECKING)
+            {
                 return None;
             }
             output::success(format!(
@@ -298,6 +348,7 @@ fn install_and_wait(
             } else {
                 output::note(format!("{} · {rules} · starts at boot", s.mode));
             }
+            warn_https_waiting(&s);
             output::note("Stop it with: sudo proxlet stop");
             return Some(Ok(()));
         }
@@ -526,6 +577,7 @@ mod tests {
             run_by: run_by.into(),
             uptime_secs: 1,
             rules: 2,
+            ..StatusInfo::default()
         }
     }
 
@@ -559,6 +611,7 @@ mod tests {
             poll: Duration::from_millis(10),
             front: None,
             confirm: Box::new(|_| panic!("unexpected prompt")),
+            publish_dir: None,
         }
     }
 
@@ -571,6 +624,29 @@ mod tests {
         let fake = Rc::new(FakeState::default());
         fake.comes_up.set(true);
         *fake.mode.borrow_mut() = Some("waiting for port 80 (held by caddy)".into());
+        start_with(&host(&fake, true, true), &locations(), false).unwrap();
+        assert_eq!(*fake.calls.borrow(), ["install", "start"]);
+    }
+
+    #[test]
+    fn start_on_a_taken_https_port_warns_and_succeeds() {
+        let s = StatusInfo {
+            https_mode: "waiting for port 443 (held by caddy)".into(),
+            https_listen: "0.0.0.0:443".into(),
+            ..status("systemd")
+        };
+        assert_eq!(
+            https_waiting(&s, |_| Some(4242)).as_deref(),
+            Some("waiting for port 443, held by caddy (pid 4242)")
+        );
+        let standalone = StatusInfo {
+            https_mode: "standalone".into(),
+            ..s.clone()
+        };
+        assert_eq!(https_waiting(&standalone, |_| None), None);
+
+        let fake = Rc::new(FakeState::default());
+        fake.comes_up.set(true);
         start_with(&host(&fake, true, true), &locations(), false).unwrap();
         assert_eq!(*fake.calls.borrow(), ["install", "start"]);
     }
@@ -728,6 +804,8 @@ mod attach_tests {
     /// `bogus`) and `-s reload`; nginx is never running.
     struct FakeNginx {
         root: PathBuf,
+        /// Report a new nginx built with TLS, which can forward HTTPS.
+        tls: bool,
     }
 
     fn contains_bogus(dir: &Path) -> bool {
@@ -749,8 +827,12 @@ mod attach_tests {
                 stderr,
             };
             match (program, args.first().copied()) {
+                ("nginx", Some("-V")) if self.tls => Ok(ok(format!(
+                    "nginx version: nginx/1.28.0\nconfigure arguments: --prefix={0} --conf-path={0}/nginx.conf --with-http_ssl_module\n",
+                    self.root.display()
+                ))),
                 ("nginx", Some("-V")) => Ok(ok(format!(
-                    "nginx version: nginx/1.24.0\nconfigure arguments: --prefix={0} --conf-path={0}/nginx.conf\n",
+                    "nginx version: nginx/1.14.2\nconfigure arguments: --prefix={0} --conf-path={0}/nginx.conf\n",
                     self.root.display()
                 ))),
                 ("nginx", Some("-t")) if contains_bogus(&self.root) => Ok(CommandOutput {
@@ -826,13 +908,30 @@ mod attach_tests {
             fake: &Rc<FakeState>,
             answer: Option<bool>,
         ) -> (Host, Rc<RefCell<Vec<String>>>) {
+            self.host_with(fake, answer, false)
+        }
+
+        fn publish_dir(&self) -> PathBuf {
+            self.dir.path().join("published")
+        }
+
+        /// Like [`Fixture::host`]; with `tls`, nginx can forward HTTPS and
+        /// `start` publishes certificates in [`Fixture::publish_dir`].
+        fn host_with(
+            &self,
+            fake: &Rc<FakeState>,
+            answer: Option<bool>,
+            tls: bool,
+        ) -> (Host, Rc<RefCell<Vec<String>>>) {
             let mut h = host(fake, true, true);
             h.front = Some(Box::new(Nginx::with_candidates(
                 FakeNginx {
                     root: self.nginx_root(),
+                    tls,
                 },
                 &["nginx"],
             )));
+            h.publish_dir = Some(self.publish_dir());
             let asked = Rc::new(RefCell::new(Vec::new()));
             let log = asked.clone();
             h.confirm = Box::new(move |q| {
@@ -898,6 +997,96 @@ mod attach_tests {
         start_with(&h, &f.locations(), true).unwrap();
         assert!(asked.borrow().is_empty());
         assert!(f.nginx_root().join("conf.d/proxlet.conf").exists());
+    }
+
+    #[test]
+    fn https_block_and_publish_dir_with_a_tls_nginx_then_stop_removes_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let before = f.snapshot();
+        let fake = started();
+        let (h, _) = f.host_with(&fake, None, true);
+        start_with(&h, &f.locations(), true).unwrap();
+
+        let block = fs::read_to_string(f.nginx_root().join("conf.d/proxlet.conf")).unwrap();
+        assert!(block.contains("listen 443 ssl default_server;"), "{block}");
+        assert!(
+            block.contains(&format!(
+                "ssl_certificate     {}/$proxlet_cert.pem;",
+                f.publish_dir().display()
+            )),
+            "{block}"
+        );
+        let mode = fs::metadata(f.publish_dir()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o2750, "{mode:o}");
+        let ledger = proxlet_front::Ledger::load(&f.locations().state_dir.join(attach::LEDGER))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.https_port, Some(443));
+        assert!(ledger.cert_dir_created);
+
+        stop_with(&h, &f.locations()).unwrap();
+        assert_eq!(f.snapshot(), before);
+        assert!(
+            !f.publish_dir().exists(),
+            "the publish directory is removed"
+        );
+    }
+
+    #[test]
+    fn old_nginx_gets_only_the_http_block_and_a_warning() {
+        let f = Fixture::new();
+        let fake = started();
+        let (h, _) = f.host_with(&fake, None, false);
+        let a = h.attach(&f.locations(), true).unwrap();
+        let attached = a.attach(&proxlet_core::Settings::default()).unwrap();
+        let why = attached.https_skipped.unwrap();
+        assert!(
+            why.contains("nginx 1.15.9 or newer") && why.contains("1.14.2"),
+            "{why}"
+        );
+        let block = fs::read_to_string(f.nginx_root().join("conf.d/proxlet.conf")).unwrap();
+        assert!(!block.contains("443"), "{block}");
+        assert!(!f.publish_dir().exists());
+    }
+
+    #[test]
+    fn one_question_names_the_default_servers_of_both_ports() {
+        let f = Fixture::new();
+        fs::write(
+            f.nginx_root().join("sites-enabled/main"),
+            "server {\n    server_name main.example;\n    listen 443 ssl default_server;\n}\n",
+        )
+        .unwrap();
+        let fake = started();
+        let (h, asked) = f.host_with(&fake, Some(true), true);
+        start_with(&h, &f.locations(), false).unwrap();
+        let asked = asked.borrow();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].contains("sites-enabled/default:2")
+                && asked[0].contains("sites-enabled/main:3"),
+            "{asked:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(f.nginx_root().join("sites-enabled/main")).unwrap(),
+            "server {\n    server_name main.example;\n    listen 443 ssl;\n}\n"
+        );
+    }
+
+    #[test]
+    fn declining_keeps_both_defaults_and_writes_nothing() {
+        let f = Fixture::new();
+        fs::write(
+            f.nginx_root().join("sites-enabled/main"),
+            "server {\n    server_name main.example;\n    listen 443 ssl default_server;\n}\n",
+        )
+        .unwrap();
+        let before = f.snapshot();
+        let fake = started();
+        let (h, _) = f.host_with(&fake, Some(false), true);
+        start_with(&h, &f.locations(), false).unwrap();
+        assert_eq!(f.snapshot(), before);
     }
 
     #[test]

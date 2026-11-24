@@ -2,8 +2,9 @@
 """A tiny WebSocket echo server and client using only the standard library.
 
     ws_echo.py serve PORT            echo every text frame back, forever
-    ws_echo.py send HOST PORT HOSTHDR PATH MESSAGE
-                                     connect, send MESSAGE, print the echo
+    ws_echo.py send HOST PORT HOSTHDR PATH MESSAGE [CAFILE]
+                                     connect, send MESSAGE, print the echo;
+                                     with CAFILE, over TLS (wss://) trusting it
 
 Used by CI to check WebSocket upgrades through nginx and proxlet.
 """
@@ -13,6 +14,7 @@ import hashlib
 import os
 import socket
 import socketserver
+import ssl
 import struct
 import sys
 
@@ -101,8 +103,11 @@ def serve(port):
         server.serve_forever()
 
 
-def send(host, port, host_header, path, message):
+def send(host, port, host_header, path, message, cafile=None):
     sock = socket.create_connection((host, port), timeout=10)
+    if cafile:
+        context = ssl.create_default_context(cafile=cafile)
+        sock = context.wrap_socket(sock, server_hostname=host_header)
     key = base64.b64encode(os.urandom(16)).decode()
     sock.sendall(
         (
@@ -124,4 +129,5 @@ if __name__ == "__main__":
     if sys.argv[1] == "serve":
         serve(int(sys.argv[2]))
     else:
-        send(sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6])
+        cafile = sys.argv[7] if len(sys.argv) > 7 else None
+        send(sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6], cafile)

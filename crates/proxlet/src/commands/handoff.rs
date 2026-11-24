@@ -22,8 +22,11 @@ pub fn run(locations: &Locations, action: HandoffAction, socket: Option<&Path>) 
     let default = locations.socket();
     let socket = socket.unwrap_or(&default);
     let (request, done) = match action {
-        HandoffAction::Release => (Request::Release, "released the HTTP port"),
-        HandoffAction::Reclaim => (Request::Reclaim, "asked to take the HTTP port back"),
+        HandoffAction::Release => (Request::Release, "released the HTTP and HTTPS ports"),
+        HandoffAction::Reclaim => (
+            Request::Reclaim,
+            "asked to take the HTTP and HTTPS ports back",
+        ),
     };
     let reply = Client::connect_with_timeout(socket, TIMEOUT).and_then(|mut c| c.call(&request));
     match reply {

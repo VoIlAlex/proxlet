@@ -126,6 +126,7 @@ failure_from!(
     proxlet_core::SettingError,
     proxlet_core::ConfigError,
     proxlet_core::ChangeError,
+    proxlet_cert::CertError,
     proxlet_front::FrontError,
     proxlet_service::ServiceError,
     std::io::Error,

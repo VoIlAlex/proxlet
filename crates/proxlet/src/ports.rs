@@ -1,5 +1,6 @@
-//! Who owns the public HTTP port: proxlet, a front server such as nginx, or
-//! something else. See design decision 1 of the `add-nginx-attach` change.
+//! Who owns a public port (HTTP or HTTPS): proxlet, a front server such as
+//! nginx, or something else. See design decision 1 of the `add-nginx-attach`
+//! change; `add-cert` runs one owner per port (its decision 6).
 //!
 //! The public listener is the only thing that comes and goes. Rules, the
 //! engine, the internal listener and every open connection are unaffected.
@@ -102,6 +103,8 @@ pub struct Owner {
     pub retry: Duration,
     /// See [`HOLD`].
     pub hold: Duration,
+    /// For the HTTPS port: the TLS configuration connections are served with.
+    pub tls: Option<Arc<proxlet_server::tls::ServerConfig>>,
 }
 
 struct Accepting {
@@ -113,6 +116,32 @@ impl Accepting {
     async fn close(self) {
         let _ = self.stop.send(());
         let _ = self.task.await;
+    }
+}
+
+/// Builds a command from its reply channel.
+type MakeCommand = fn(Option<oneshot::Sender<()>>) -> Command;
+
+/// Forwards each command to every owner, replying once all of them have, so
+/// a release frees the HTTP and the HTTPS port together. Ends when `commands`
+/// closes.
+pub async fn fan_out(mut commands: mpsc::Receiver<Command>, owners: Vec<mpsc::Sender<Command>>) {
+    while let Some(cmd) = commands.recv().await {
+        let (to, make): (_, MakeCommand) = match cmd {
+            Command::Release(to) => (to, Command::Release),
+            Command::Reclaim(to) => (to, Command::Reclaim),
+        };
+        let mut waits = Vec::new();
+        for owner in &owners {
+            let (tx, rx) = oneshot::channel();
+            if owner.send(make(Some(tx))).await.is_ok() {
+                waits.push(rx);
+            }
+        }
+        for rx in waits {
+            let _ = rx.await;
+        }
+        reply(to);
     }
 }
 
@@ -225,15 +254,17 @@ impl Owner {
             .and_then(|()| tokio::net::TcpListener::from_std(listener));
         let engine = self.engine.clone();
         let conns = self.conns.clone();
+        let tls = self.tls.clone();
         let task = tokio::spawn(async move {
-            match listener {
-                Ok(l) => {
-                    proxlet_server::accept(l, engine, conns, Origin::Direct, async {
-                        let _ = stopped.await;
-                    })
-                    .await;
+            let stop = async {
+                let _ = stopped.await;
+            };
+            match (listener, tls) {
+                (Ok(l), None) => {
+                    proxlet_server::accept(l, engine, conns, Origin::Direct, stop).await;
                 }
-                Err(e) => tracing::error!("cannot use the public listener: {e}"),
+                (Ok(l), Some(tls)) => proxlet_server::accept_tls(l, engine, conns, tls, stop).await,
+                (Err(e), _) => tracing::error!("cannot use the public listener: {e}"),
             }
         });
         Accepting { stop, task }
@@ -372,6 +403,7 @@ mod tests {
             port: 80,
             retry: R,
             hold: H,
+            tls: None,
         };
         let (mode_tx, mode) = watch::channel(Mode::Released);
         let (commands, rx) = mpsc::channel(8);

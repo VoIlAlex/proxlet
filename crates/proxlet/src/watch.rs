@@ -109,14 +109,15 @@ impl ProcessEdge {
     }
 }
 
-/// Follows the front server while proxlet holds the port, and asks the port
-/// owner to release it when the front server tries to bind.
+/// Follows the front server while proxlet holds one of `ports`, and asks the
+/// port owners to release them when the front server tries to bind any.
+/// `modes` are the owners' modes, one per port.
 pub async fn run(
     front: Arc<dyn FrontServer>,
     log: Option<PathBuf>,
-    port: u16,
+    ports: Vec<u16>,
     attach_enabled: impl Fn() -> bool + Send + 'static,
-    mode: watch::Receiver<Mode>,
+    modes: Vec<watch::Receiver<Mode>>,
     commands: mpsc::Sender<Command>,
     mut stop: watch::Receiver<bool>,
 ) {
@@ -148,10 +149,12 @@ pub async fn run(
             _ = stop.wait_for(|s| *s) => return,
             () = tokio::time::sleep(interval) => {}
         }
-        let standalone = *mode.borrow() == Mode::Standalone;
+        let standalone = modes.iter().any(|m| *m.borrow() == Mode::Standalone);
         let wants_port = if let Some(t) = &mut tail {
             let lines = t.poll().unwrap_or_default();
-            lines.iter().any(|l| front.is_bind_failure(l, port))
+            lines
+                .iter()
+                .any(|l| ports.iter().any(|p| front.is_bind_failure(l, *p)))
         } else {
             let f = front.clone();
             let running = tokio::task::spawn_blocking(move || f.is_running())
@@ -161,7 +164,7 @@ pub async fn run(
         };
         if wants_port && standalone && attach_enabled() {
             tracing::info!(
-                "{} is trying to bind port {port}; handing it over",
+                "{} is trying to bind its ports; handing them over",
                 front.name()
             );
             let _ = commands.send(Command::Release(None)).await;

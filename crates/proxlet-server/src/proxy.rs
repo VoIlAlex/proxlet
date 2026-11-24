@@ -100,7 +100,12 @@ fn set_forwarded(headers: &mut HeaderMap, peer: SocketAddr, origin: Origin, host
     if let Ok(v) = HeaderValue::from_str(&xff) {
         headers.insert("x-forwarded-for", v);
     }
-    headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+    let proto = if origin == Origin::Tls {
+        "https"
+    } else {
+        "http"
+    };
+    headers.insert("x-forwarded-proto", HeaderValue::from_static(proto));
     if let Some(v) = host.and_then(|h| HeaderValue::from_str(h).ok()) {
         headers.insert("x-forwarded-host", v);
     }

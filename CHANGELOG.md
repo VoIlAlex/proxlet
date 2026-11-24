@@ -19,8 +19,17 @@ All notable changes to this project are documented here. The format follows
 - Taking over nginx's default server after confirmation (`sudo proxlet start --yes` to skip the prompt).
 - `proxlet add` warns and asks when nginx already serves the host; `proxlet ls` marks such rules.
 - Settings `attach.enabled` and `attach.port`.
+- `proxlet cert <domain>…` gets Let's Encrypt certificates through the HTTP-01 challenge, which the running server answers. It first checks that the name is public, resolves, is not served by nginx, and reaches this proxlet; `--yes` accepts the CA's terms. No email address is asked for.
+- `proxlet cert ls`, `cert rm` and `cert renew`; automatic renewal when a third of a certificate's lifetime is left, with backoff on failure. `proxlet status` warns about expiring or failing certificates.
+- HTTPS: proxlet serves port 443 (`listen.https_port`) with SNI certificate selection, HTTP/2 and WebSockets; certificates change without a restart. Port 443 follows the same ownership rules as port 80.
+- HTTPS behind nginx: a second catch-all on port 443 that terminates TLS with proxlet's certificate for the requested name (nginx 1.15.9 or newer). The default-server takeover covers both ports.
+- Settings `listen.https_port`, `tls.redirect` and `cert.server` (`production`, `staging` or an ACME directory URL).
 
 ### Changed
+
+- **Breaking:** once a host has a certificate, plain HTTP requests for it are redirected to HTTPS (`308`) while HTTPS is served. `proxlet config tls.redirect off` keeps the old behaviour.
+- Declining the default-server takeover now keeps nginx's default only on the ports that have one; a port without a default server still gets proxlet's block.
+- The HTTP, HTTPS and attach ports must differ; `proxlet config` refuses a change that would make two of them equal.
 
 - A port held by another process no longer stops `proxlet run` or `proxlet start`: proxlet logs the holder, waits, and takes the port when it is free. `proxlet status` shows `waiting for port 80 (held by …)`.
 - `proxlet ls` plain output has a fourth tab-separated field (empty unless nginx serves the rule's host).

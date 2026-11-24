@@ -9,7 +9,9 @@ mod files;
 mod proxy;
 mod response;
 mod snapshot;
+pub mod tls;
 
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -18,7 +20,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use http::{Request, Response, header};
+use http::{HeaderValue, Method, Request, Response, StatusCode, header};
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -26,6 +28,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 pub use snapshot::{BuildError, Snapshot};
 
@@ -40,10 +43,27 @@ struct ClientSlot {
     client: proxy::UpstreamClient,
 }
 
-/// Shared engine state: the current snapshot and the upstream client.
+/// The path prefix of HTTP-01 challenge requests.
+pub const CHALLENGE_PREFIX: &str = "/.well-known/acme-challenge/";
+
+/// What the redirect to HTTPS needs to know (design decision 4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TlsView {
+    /// Lowercase names that have a certificate.
+    pub names: HashSet<String>,
+    /// Whether HTTPS is being served right now, by proxlet or by a front server.
+    pub https_served: bool,
+    /// The public HTTPS port, for the redirect's `Location`.
+    pub https_port: u16,
+}
+
+/// Shared engine state: the current snapshot, the upstream client, pending
+/// ACME challenges and what the HTTPS redirect needs.
 pub struct Engine {
     snapshot: ArcSwap<Snapshot>,
     client: ArcSwap<ClientSlot>,
+    challenges: ArcSwap<HashMap<String, String>>,
+    tls: ArcSwap<TlsView>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -65,7 +85,38 @@ impl Engine {
                 connect_timeout,
                 client: proxy::client(connect_timeout),
             }),
+            challenges: ArcSwap::from_pointee(HashMap::new()),
+            tls: ArcSwap::from_pointee(TlsView::default()),
         })
+    }
+
+    /// Starts answering the HTTP-01 challenge `token` with `key_authorization`.
+    pub fn publish_challenge(&self, token: &str, key_authorization: &str) {
+        self.challenges.rcu(|m| {
+            let mut m = HashMap::clone(m);
+            m.insert(token.to_owned(), key_authorization.to_owned());
+            m
+        });
+    }
+
+    /// Stops answering the challenge `token`.
+    pub fn withdraw_challenge(&self, token: &str) {
+        self.challenges.rcu(|m| {
+            let mut m = HashMap::clone(m);
+            m.remove(token);
+            m
+        });
+    }
+
+    /// Replaces what the HTTPS redirect is based on.
+    pub fn set_tls_view(&self, view: TlsView) {
+        self.tls.store(Arc::new(view));
+    }
+
+    /// What the HTTPS redirect is currently based on.
+    #[must_use]
+    pub fn tls_view(&self) -> Arc<TlsView> {
+        self.tls.load_full()
     }
 
     /// Atomically replaces the snapshot. In-flight requests finish on the old one.
@@ -109,6 +160,12 @@ impl Engine {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned)
             });
+        if let Some(resp) = self.challenge_response(&req) {
+            return resp;
+        }
+        if let Some(resp) = self.redirect(&snap, origin, host.as_deref(), &req) {
+            return resp;
+        }
         let Some(m) = snap.table.lookup(host.as_deref(), req.uri().path()) else {
             return response::no_rule(host.as_deref(), req.uri().path());
         };
@@ -125,6 +182,78 @@ impl Engine {
     }
 }
 
+impl Engine {
+    fn challenge_response(&self, req: &Request<Incoming>) -> Option<Response<Body>> {
+        if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            return None;
+        }
+        let token = req.uri().path().strip_prefix(CHALLENGE_PREFIX)?;
+        let key_auth = self.challenges.load().get(token).cloned()?;
+        let mut resp = Response::new(response::full(key_auth));
+        resp.headers_mut().insert(header::SERVER, response::SERVER);
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        Some(resp)
+    }
+
+    fn redirect(
+        &self,
+        snap: &Snapshot,
+        origin: Origin,
+        host: Option<&str>,
+        req: &Request<Incoming>,
+    ) -> Option<Response<Body>> {
+        if !snap.settings.tls_redirect || req.uri().path().starts_with(CHALLENGE_PREFIX) {
+            return None;
+        }
+        let view = self.tls.load();
+        if !view.https_served || effective_scheme(origin, req) != "http" {
+            return None;
+        }
+        let name = host_name(host?).to_ascii_lowercase();
+        if !view.names.contains(&name) {
+            return None;
+        }
+        let port = if view.https_port == 443 {
+            String::new()
+        } else {
+            format!(":{}", view.https_port)
+        };
+        let path = req
+            .uri()
+            .path_and_query()
+            .map_or("/", http::uri::PathAndQuery::as_str);
+        let location = HeaderValue::from_str(&format!("https://{name}{port}{path}")).ok()?;
+        let mut resp = response::status(StatusCode::PERMANENT_REDIRECT);
+        resp.headers_mut().insert(header::LOCATION, location);
+        Some(resp)
+    }
+}
+
+/// `http` or `https`: how the client reached proxlet (or the front server).
+fn effective_scheme(origin: Origin, req: &Request<Incoming>) -> &str {
+    match origin {
+        Origin::Tls => "https",
+        Origin::Direct => "http",
+        Origin::Front => req
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map_or("http", str::trim),
+    }
+}
+
+/// The host without a port: `example.com:8080` → `example.com`, `[::1]:80` → `[::1]`.
+fn host_name(host: &str) -> &str {
+    if host.starts_with('[') {
+        return host.split_inclusive(']').next().unwrap_or(host);
+    }
+    host.rsplit_once(':').map_or(host, |(h, _)| h)
+}
+
 /// Where a connection came from, which decides how forwarding headers are set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -133,6 +262,8 @@ pub enum Origin {
     /// A trusted front server (nginx) on loopback forwarded the request; its
     /// `X-Forwarded-For` and `X-Forwarded-Proto` are kept as they are.
     Front,
+    /// A client connected to proxlet's HTTPS listener.
+    Tls,
 }
 
 /// The open connections of every listener, so they can be drained together.
@@ -181,6 +312,9 @@ impl Connections {
     }
 }
 
+/// How long a client may take to finish the TLS handshake.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Accepts connections on `listener` until `stop` resolves, then closes the
 /// listener and returns. Accepted connections keep running in `conns`.
 pub async fn accept(
@@ -188,6 +322,31 @@ pub async fn accept(
     engine: Arc<Engine>,
     conns: Connections,
     origin: Origin,
+    stop: impl Future<Output = ()>,
+) {
+    accept_with(listener, engine, conns, origin, None, stop).await;
+}
+
+/// Like [`accept`] for the HTTPS listener: each connection's TLS handshake
+/// runs in its own task (bounded by [`HANDSHAKE_TIMEOUT`]), so a slow client
+/// never holds up the accept loop.
+pub async fn accept_tls(
+    listener: TcpListener,
+    engine: Arc<Engine>,
+    conns: Connections,
+    tls: Arc<rustls::ServerConfig>,
+    stop: impl Future<Output = ()>,
+) {
+    let acceptor = TlsAcceptor::from(tls);
+    accept_with(listener, engine, conns, Origin::Tls, Some(acceptor), stop).await;
+}
+
+async fn accept_with(
+    listener: TcpListener,
+    engine: Arc<Engine>,
+    conns: Connections,
+    origin: Origin,
+    tls: Option<TlsAcceptor>,
     stop: impl Future<Output = ()>,
 ) {
     tokio::pin!(stop);
@@ -206,21 +365,45 @@ pub async fn accept(
         };
         let _ = stream.set_nodelay(true);
         let engine = engine.clone();
-        let service = service_fn(move |req| {
-            let engine = engine.clone();
-            async move { Ok::<_, Infallible>(engine.handle_from(peer, origin, req).await) }
-        });
-        let conn = auto::Builder::new(TokioExecutor::new())
-            .serve_connection_with_upgrades(TokioIo::new(stream), service)
-            .into_owned();
-        let conn = conns.graceful.watch(conn);
+        let watcher = conns.graceful.watcher();
+        let tls = tls.clone();
         tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                tracing::debug!(%peer, "connection ended with error: {e}");
+            match tls {
+                None => serve_io(TokioIo::new(stream), engine, peer, origin, watcher).await,
+                Some(acceptor) => {
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                        Ok(Ok(tls_stream)) => {
+                            serve_io(TokioIo::new(tls_stream), engine, peer, origin, watcher).await;
+                        }
+                        Ok(Err(e)) => tracing::debug!(%peer, "TLS handshake failed: {e}"),
+                        Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
+                    }
+                }
             }
         });
     }
     drop(listener);
+}
+
+async fn serve_io<IO>(
+    io: TokioIo<IO>,
+    engine: Arc<Engine>,
+    peer: SocketAddr,
+    origin: Origin,
+    watcher: hyper_util::server::graceful::Watcher,
+) where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = service_fn(move |req| {
+        let engine = engine.clone();
+        async move { Ok::<_, Infallible>(engine.handle_from(peer, origin, req).await) }
+    });
+    let conn = auto::Builder::new(TokioExecutor::new())
+        .serve_connection_with_upgrades(io, service)
+        .into_owned();
+    if let Err(e) = watcher.watch(conn).await {
+        tracing::debug!(%peer, "connection ended with error: {e}");
+    }
 }
 
 /// Accepts connections on `listener` and serves them until `shutdown`

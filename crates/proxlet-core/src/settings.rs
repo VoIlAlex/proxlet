@@ -25,6 +25,14 @@ pub enum SettingError {
         /// What the setting accepts.
         expected: &'static str,
     },
+    /// The value is valid on its own but conflicts with another setting.
+    #[error("{message}")]
+    Conflict {
+        /// The setting key.
+        key: &'static str,
+        /// What conflicts and how to fix it.
+        message: String,
+    },
 }
 
 /// The type of a setting's value.
@@ -38,6 +46,8 @@ pub enum Kind {
     Ip,
     /// A duration such as `500ms`, `5s` or `2m`.
     Duration,
+    /// An ACME server: `production`, `staging` or an `https://` directory URL.
+    AcmeServer,
 }
 
 impl Kind {
@@ -47,6 +57,9 @@ impl Kind {
             Self::Port => "the value must be a port from 1 to 65535",
             Self::Ip => "the value must be an IP address such as `0.0.0.0` or `127.0.0.1`",
             Self::Duration => "the value must be a number followed by `ms`, `s` or `m`, e.g. `30s`",
+            Self::AcmeServer => {
+                "the value must be `production`, `staging` or an `https://` ACME directory URL"
+            }
         }
     }
 
@@ -55,6 +68,7 @@ impl Kind {
     pub fn fixed_values(self) -> &'static [&'static str] {
         match self {
             Self::Bool => &["on", "off"],
+            Self::AcmeServer => &["production", "staging"],
             _ => &[],
         }
     }
@@ -86,6 +100,12 @@ pub const SETTINGS: &[SettingDef] = &[
         kind: Kind::Port,
         live: false,
         help: "Port the HTTP listener binds to",
+    },
+    SettingDef {
+        key: "listen.https_port",
+        kind: Kind::Port,
+        live: false,
+        help: "Port the HTTPS listener binds to",
     },
     SettingDef {
         key: "static.listing",
@@ -123,6 +143,18 @@ pub const SETTINGS: &[SettingDef] = &[
         live: false,
         help: "Loopback port nginx forwards to when proxlet is attached",
     },
+    SettingDef {
+        key: "tls.redirect",
+        kind: Kind::Bool,
+        live: true,
+        help: "Redirect plain HTTP to HTTPS for hosts that have a certificate",
+    },
+    SettingDef {
+        key: "cert.server",
+        kind: Kind::AcmeServer,
+        live: true,
+        help: "ACME server certificates come from: production, staging or a URL",
+    },
 ];
 
 /// Looks up a setting definition, suggesting the closest key on a miss.
@@ -159,8 +191,57 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Where certificates come from (`cert.server`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AcmeServer {
+    /// Let's Encrypt.
+    Production,
+    /// Let's Encrypt's staging environment (untrusted certificates, high limits).
+    Staging,
+    /// Any ACME directory, by its `https://` URL.
+    Url(String),
+}
+
+impl AcmeServer {
+    /// Let's Encrypt's production directory.
+    pub const PRODUCTION_URL: &'static str = "https://acme-v02.api.letsencrypt.org/directory";
+    /// Let's Encrypt's staging directory.
+    pub const STAGING_URL: &'static str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+    /// The ACME directory URL.
+    #[must_use]
+    pub fn directory_url(&self) -> &str {
+        match self {
+            Self::Production => Self::PRODUCTION_URL,
+            Self::Staging => Self::STAGING_URL,
+            Self::Url(u) => u,
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "production" => return Some(Self::Production),
+            "staging" => return Some(Self::Staging),
+            _ => {}
+        }
+        let rest = s.strip_prefix("https://")?;
+        let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        (!host.is_empty() && !s.contains(char::is_whitespace)).then(|| Self::Url(s.to_owned()))
+    }
+}
+
+impl fmt::Display for AcmeServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Production => f.write_str("production"),
+            Self::Staging => f.write_str("staging"),
+            Self::Url(u) => f.write_str(u),
+        }
+    }
+}
+
 /// A typed setting value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     /// A boolean.
     Bool(bool),
@@ -170,6 +251,8 @@ pub enum Value {
     Ip(IpAddr),
     /// A duration.
     Duration(Duration),
+    /// An ACME server.
+    AcmeServer(AcmeServer),
 }
 
 impl Value {
@@ -193,6 +276,9 @@ impl Value {
             },
             Kind::Ip => s.parse().map(Self::Ip).map_err(|_| invalid()),
             Kind::Duration => parse_duration(s).map(Self::Duration).ok_or_else(invalid),
+            Kind::AcmeServer => AcmeServer::parse(s)
+                .map(Self::AcmeServer)
+                .ok_or_else(invalid),
         }
     }
 }
@@ -205,6 +291,7 @@ impl fmt::Display for Value {
             Self::Port(p) => write!(f, "{p}"),
             Self::Ip(ip) => write!(f, "{ip}"),
             Self::Duration(d) => f.write_str(&format_duration(*d)),
+            Self::AcmeServer(s) => s.fmt(f),
         }
     }
 }
@@ -235,11 +322,17 @@ fn format_duration(d: Duration) -> String {
 
 /// The current value of every setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one field per on/off setting"
+)]
 pub struct Settings {
     /// `listen.address`
     pub listen_address: IpAddr,
     /// `listen.http_port`
     pub http_port: u16,
+    /// `listen.https_port`
+    pub https_port: u16,
     /// `static.listing`
     pub static_listing: bool,
     /// `static.dotfiles`
@@ -252,6 +345,10 @@ pub struct Settings {
     pub attach_enabled: bool,
     /// `attach.port`
     pub attach_port: u16,
+    /// `tls.redirect`
+    pub tls_redirect: bool,
+    /// `cert.server`
+    pub cert_server: AcmeServer,
 }
 
 impl Default for Settings {
@@ -259,12 +356,15 @@ impl Default for Settings {
         Self {
             listen_address: IpAddr::from([0, 0, 0, 0]),
             http_port: 80,
+            https_port: 443,
             static_listing: true,
             static_dotfiles: false,
             connect_timeout: Duration::from_secs(5),
             proxy_timeout: Duration::from_secs(60),
             attach_enabled: true,
             attach_port: 47080,
+            tls_redirect: true,
+            cert_server: AcmeServer::Production,
         }
     }
 }
@@ -276,12 +376,15 @@ impl Settings {
         match def.key {
             "listen.address" => Value::Ip(self.listen_address),
             "listen.http_port" => Value::Port(self.http_port),
+            "listen.https_port" => Value::Port(self.https_port),
             "static.listing" => Value::Bool(self.static_listing),
             "static.dotfiles" => Value::Bool(self.static_dotfiles),
             "proxy.connect_timeout" => Value::Duration(self.connect_timeout),
             "proxy.timeout" => Value::Duration(self.proxy_timeout),
             "attach.enabled" => Value::Bool(self.attach_enabled),
             "attach.port" => Value::Port(self.attach_port),
+            "tls.redirect" => Value::Bool(self.tls_redirect),
+            "cert.server" => Value::AcmeServer(self.cert_server.clone()),
             other => unreachable!("setting `{other}` has no field"),
         }
     }
@@ -295,14 +398,48 @@ impl Settings {
         match (def.key, value) {
             ("listen.address", Value::Ip(v)) => self.listen_address = v,
             ("listen.http_port", Value::Port(v)) => self.http_port = v,
+            ("listen.https_port", Value::Port(v)) => self.https_port = v,
             ("static.listing", Value::Bool(v)) => self.static_listing = v,
             ("static.dotfiles", Value::Bool(v)) => self.static_dotfiles = v,
             ("proxy.connect_timeout", Value::Duration(v)) => self.connect_timeout = v,
             ("proxy.timeout", Value::Duration(v)) => self.proxy_timeout = v,
             ("attach.enabled", Value::Bool(v)) => self.attach_enabled = v,
             ("attach.port", Value::Port(v)) => self.attach_port = v,
+            ("tls.redirect", Value::Bool(v)) => self.tls_redirect = v,
+            ("cert.server", Value::AcmeServer(v)) => self.cert_server = v,
             (key, value) => panic!("value {value:?} does not fit setting `{key}`"),
         }
+    }
+
+    /// Checks the settings against each other. `changed` is the key that was
+    /// just set, so the message can name it.
+    ///
+    /// # Errors
+    ///
+    /// When two settings that must differ are the same.
+    pub fn check(&self, changed: Option<&'static str>) -> Result<(), SettingError> {
+        let ports = [
+            ("listen.http_port", "HTTP port", self.http_port),
+            ("listen.https_port", "HTTPS port", self.https_port),
+            ("attach.port", "attach port", self.attach_port),
+        ];
+        for (i, a) in ports.iter().enumerate() {
+            for b in &ports[i + 1..] {
+                if a.2 != b.2 {
+                    continue;
+                }
+                // Name the one just changed first.
+                let (first, second) = if changed == Some(b.0) { (b, a) } else { (a, b) };
+                return Err(SettingError::Conflict {
+                    key: first.0,
+                    message: format!(
+                        "the {} must differ from the {} (`{}` is {}); pick another port",
+                        first.1, second.1, second.0, second.2
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Whether a setting differs from its default.
@@ -326,7 +463,19 @@ mod tests {
         let shown: Vec<String> = SETTINGS.iter().map(|d| s.get(d).to_string()).collect();
         assert_eq!(
             shown,
-            ["0.0.0.0", "80", "on", "off", "5s", "1m", "on", "47080"]
+            [
+                "0.0.0.0",
+                "80",
+                "443",
+                "on",
+                "off",
+                "5s",
+                "1m",
+                "on",
+                "47080",
+                "on",
+                "production"
+            ]
         );
         assert!(SETTINGS.iter().all(|d| !s.is_changed(d)));
     }
@@ -380,6 +529,64 @@ mod tests {
         for bad in ["", "5", "s", "5h", "0s", "-1s", "1.5s"] {
             assert!(Value::parse(d, bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn acme_server_values() {
+        let d = def("cert.server");
+        assert_eq!(
+            Value::parse(d, "staging").unwrap(),
+            Value::AcmeServer(AcmeServer::Staging)
+        );
+        assert_eq!(
+            Value::parse(d, "Production").unwrap().to_string(),
+            "production"
+        );
+        let url = "https://localhost:14000/dir";
+        assert_eq!(Value::parse(d, url).unwrap().to_string(), url);
+        assert_eq!(
+            AcmeServer::Url(url.into()).directory_url(),
+            url,
+            "a custom URL is used as is"
+        );
+        assert_eq!(AcmeServer::Staging.directory_url(), AcmeServer::STAGING_URL);
+        for bad in ["http://acme.local/dir", "https://", "prod", "https://a b"] {
+            let err = Value::parse(d, bad).unwrap_err().to_string();
+            assert!(
+                err.contains("`production`, `staging` or an `https://`"),
+                "{bad}: {err}"
+            );
+        }
+        assert_eq!(d.kind.fixed_values(), ["production", "staging"]);
+    }
+
+    #[test]
+    fn ports_must_differ() {
+        assert!(Settings::default().check(None).is_ok());
+        let s = Settings {
+            https_port: 80,
+            ..Settings::default()
+        };
+        let err = s.check(Some("listen.https_port")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the HTTPS port must differ from the HTTP port (`listen.http_port` is 80); pick another port"
+        );
+        let s = Settings {
+            http_port: 443,
+            ..Settings::default()
+        };
+        let err = s.check(Some("listen.http_port")).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("the HTTP port must differ from the HTTPS port"),
+            "{err}"
+        );
+        let s = Settings {
+            attach_port: 443,
+            ..Settings::default()
+        };
+        assert!(s.check(Some("attach.port")).is_err());
     }
 
     #[test]

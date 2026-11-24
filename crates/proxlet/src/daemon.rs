@@ -2,19 +2,21 @@
 
 use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proxlet_core::{ConfigFile, Locations, port};
 use proxlet_front::FrontServer;
+use proxlet_server::tls::{CertResolver, server_config};
 use proxlet_server::{Connections, Engine, Origin, Snapshot};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::attach;
-use crate::control::{self, Reply, Request, StatusInfo, WireOutcome};
+use crate::certs::{self, Certs};
+use crate::control::{self, CertReply, RenewReply, Reply, Request, StatusInfo, WireOutcome};
 use crate::output::{CmdResult, Failure};
 use crate::pipeline;
 use crate::ports::{self, Mode};
@@ -31,9 +33,12 @@ struct State {
     apply_lock: Mutex<()>,
     started: Instant,
     listen: SocketAddr,
+    https_listen: SocketAddr,
     internal: SocketAddr,
     mode: watch::Receiver<Mode>,
+    https_mode: watch::Receiver<Mode>,
     ports: mpsc::Sender<ports::Command>,
+    certs: Arc<Certs>,
     run_by: String,
     stop: watch::Sender<bool>,
 }
@@ -47,6 +52,9 @@ pub fn run(locations: &Locations) -> CmdResult {
 }
 
 async fn run_async(locations: &Locations) -> CmdResult {
+    // Before anything can observe the server (the control socket), so a stop
+    // signal is never met by the default action, which kills the process.
+    let term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let socket = locations.socket();
     if control::running(&socket).is_some() {
         return Err(Failure::new("proxlet is already running").hint("See it with: proxlet status"));
@@ -57,6 +65,7 @@ async fn run_async(locations: &Locations) -> CmdResult {
     let snapshot = Snapshot::build(&config).map_err(|e| Failure::new(e.to_string()))?;
     let settings = &config.settings;
     let listen = SocketAddr::new(settings.listen_address, settings.http_port);
+    let https_listen = SocketAddr::new(settings.listen_address, settings.https_port);
     let internal = SocketAddr::from(([127, 0, 0, 1], settings.attach_port));
 
     let internal_listener = bind_internal(internal)?;
@@ -65,38 +74,47 @@ async fn run_async(locations: &Locations) -> CmdResult {
     let ledger = locations.state_dir.join(attach::LEDGER);
     let attached_here = foreground && attach_in_foreground(&*front, &ledger, settings);
     let first = bind_public(listen)?;
+    let first_https = bind_https(https_listen)?;
     let control_listener = bind_control(locations)?;
 
     let rules = snapshot.rule_count();
     let engine = Engine::new(snapshot);
     let conns = Connections::new();
     let (stop, stop_rx) = watch::channel(false);
-    let (mode_tx, mode) = watch::channel(Mode::Waiting {
-        reason: ports::CHECKING.into(),
-    });
-    let (ports_tx, ports_rx) = mpsc::channel(8);
+    let wiring = wire_ports();
+    let resolver = CertResolver::new();
+    let certs = Arc::new(Certs::new(
+        &locations.state_dir,
+        resolver.clone(),
+        engine.clone(),
+        wiring.https_mode.clone(),
+        https_listen.port(),
+    ));
+    let cert_count = certs.reload();
     let state = Arc::new(State {
         engine: engine.clone(),
         file,
         apply_lock: Mutex::new(()),
         started: Instant::now(),
         listen,
+        https_listen,
         internal,
-        mode,
-        ports: ports_tx,
+        mode: wiring.mode,
+        https_mode: wiring.https_mode,
+        ports: wiring.ports,
+        certs: certs.clone(),
         run_by: std::env::var(SERVICE_ENV).unwrap_or_else(|_| "foreground".into()),
         stop,
     });
 
     tokio::spawn(control_loop(control_listener, state.clone()));
-    tracing::info!(
-        "proxlet {} started with {rules} rule{}; internal listener on http://{internal}",
-        env!("CARGO_PKG_VERSION"),
-        if rules == 1 { "" } else { "s" }
+    log_start(
+        rules,
+        &state,
+        first.is_some(),
+        first_https.is_some(),
+        cert_count,
     );
-    if first.is_some() {
-        tracing::info!("listening on http://{listen}");
-    }
 
     let internal_task = tokio::spawn(proxlet_server::accept(
         internal_listener,
@@ -105,35 +123,29 @@ async fn run_async(locations: &Locations) -> CmdResult {
         Origin::Front,
         stopped(stop_rx.clone()),
     ));
-    spawn_watcher(&front, &engine, &state, listen.port(), &stop_rx);
-    let owner = ports::Owner {
-        binder: Box::new(move || std::net::TcpListener::bind(listen)),
-        probe: Arc::new(HostProbe {
-            front: front.clone(),
-        }),
-        engine,
-        conns: conns.clone(),
-        port: listen.port(),
-        retry: ports::RETRY,
-        hold: ports::HOLD,
-    };
-    let owner_task = tokio::spawn(owner.run(first, mode_tx, ports_rx, stopped(stop_rx.clone())));
+    spawn_watcher(&front, &engine, &state, &stop_rx);
+    let probe: Arc<dyn ports::Probe> = Arc::new(HostProbe {
+        front: front.clone(),
+    });
+    let owner = public_owner(listen, probe.clone(), &engine, &conns, None);
+    let owner_task = tokio::spawn(owner.run(
+        first,
+        wiring.mode_tx,
+        wiring.http_rx,
+        stopped(stop_rx.clone()),
+    ));
+    let tls = Some(server_config(resolver));
+    let https_owner = public_owner(https_listen, probe, &engine, &conns, tls);
+    let https_task = tokio::spawn(https_owner.run(
+        first_https,
+        wiring.https_mode_tx,
+        wiring.https_rx,
+        stopped(stop_rx.clone()),
+    ));
+    spawn_cert_tasks(certs, &state, &stop_rx);
 
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut stop_rx = stop_rx;
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
-        _ = stop_rx.changed() => {}
-    }
-    tracing::info!(
-        "stopping; waiting up to {}s for in-flight requests",
-        GRACE.as_secs()
-    );
-    let _ = state.stop.send(true);
-    let _ = internal_task.await;
-    let _ = owner_task.await;
-    conns.drain(GRACE).await;
+    wait_for_stop(term, stop_rx).await;
+    stop_serving(&state, [internal_task, owner_task, https_task], conns).await;
     if attached_here {
         detach_in_foreground(&*front, &ledger);
     }
@@ -142,12 +154,127 @@ async fn run_async(locations: &Locations) -> CmdResult {
     Ok(())
 }
 
-/// Follows the front server, if one is installed, to hand it the port when it starts.
+/// Stops every listener, then gives open connections [`GRACE`] to finish.
+async fn stop_serving(
+    state: &State,
+    listeners: [tokio::task::JoinHandle<()>; 3],
+    conns: Connections,
+) {
+    tracing::info!(
+        "stopping; waiting up to {}s for in-flight requests",
+        GRACE.as_secs()
+    );
+    let _ = state.stop.send(true);
+    for task in listeners {
+        let _ = task.await;
+    }
+    conns.drain(GRACE).await;
+}
+
+/// The channels between the control socket, the two port owners and status.
+struct PortWiring {
+    mode_tx: watch::Sender<Mode>,
+    mode: watch::Receiver<Mode>,
+    https_mode_tx: watch::Sender<Mode>,
+    https_mode: watch::Receiver<Mode>,
+    http_rx: mpsc::Receiver<ports::Command>,
+    https_rx: mpsc::Receiver<ports::Command>,
+    /// Commands for both owners (see [`ports::fan_out`]).
+    ports: mpsc::Sender<ports::Command>,
+}
+
+fn wire_ports() -> PortWiring {
+    let checking = || Mode::Waiting {
+        reason: ports::CHECKING.into(),
+    };
+    let (mode_tx, mode) = watch::channel(checking());
+    let (https_mode_tx, https_mode) = watch::channel(checking());
+    let (http_tx, http_rx) = mpsc::channel(8);
+    let (https_tx, https_rx) = mpsc::channel(8);
+    let (ports, ports_rx) = mpsc::channel(8);
+    tokio::spawn(ports::fan_out(ports_rx, vec![http_tx, https_tx]));
+    PortWiring {
+        mode_tx,
+        mode,
+        https_mode_tx,
+        https_mode,
+        http_rx,
+        https_rx,
+        ports,
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+fn log_start(rules: usize, state: &State, http: bool, https: bool, certs: usize) {
+    tracing::info!(
+        "proxlet {} started with {rules} rule{}; internal listener on http://{}",
+        env!("CARGO_PKG_VERSION"),
+        plural(rules),
+        state.internal
+    );
+    if http {
+        tracing::info!("listening on http://{}", state.listen);
+    }
+    if https {
+        tracing::info!(
+            "listening on https://{} with {certs} certificate{}",
+            state.https_listen,
+            plural(certs)
+        );
+    }
+}
+
+/// Waits for Ctrl-C, SIGTERM or a `shutdown` request.
+async fn wait_for_stop(mut term: tokio::signal::unix::Signal, mut stop: watch::Receiver<bool>) {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+        _ = stop.changed() => {}
+    }
+}
+
+/// The owner of a public port, serving TLS when `tls` is set.
+fn public_owner(
+    addr: SocketAddr,
+    probe: Arc<dyn ports::Probe>,
+    engine: &Arc<Engine>,
+    conns: &Connections,
+    tls: Option<Arc<proxlet_server::tls::ServerConfig>>,
+) -> ports::Owner {
+    ports::Owner {
+        binder: Box::new(move || std::net::TcpListener::bind(addr)),
+        probe,
+        engine: engine.clone(),
+        conns: conns.clone(),
+        port: addr.port(),
+        retry: ports::RETRY,
+        hold: ports::HOLD,
+        tls,
+    }
+}
+
+/// Keeps the redirect view current, and renews certificates when due.
+fn spawn_cert_tasks(certs: Arc<Certs>, state: &Arc<State>, stop: &watch::Receiver<bool>) {
+    tokio::spawn(follow_https_mode(certs.clone(), state.https_mode.clone()));
+    let (first_check, every) = certs::renewal_schedule();
+    tokio::spawn(certs::renewal_loop(certs, first_check, every, stop.clone()));
+}
+
+/// Keeps the redirect view in step with whether HTTPS is being served.
+async fn follow_https_mode(certs: Arc<Certs>, mut mode: watch::Receiver<Mode>) {
+    while mode.changed().await.is_ok() {
+        certs.refresh_view();
+    }
+}
+
+/// Follows the front server, if one is installed, to hand it the ports when it starts.
 fn spawn_watcher(
     front: &Arc<dyn FrontServer>,
     engine: &Arc<Engine>,
     state: &Arc<State>,
-    port: u16,
     stop: &watch::Receiver<bool>,
 ) {
     let Some(inst) = front.detect() else {
@@ -162,9 +289,9 @@ fn spawn_watcher(
     tokio::spawn(crate::watch::run(
         front.clone(),
         log,
-        port,
+        vec![state.listen.port(), state.https_listen.port()],
         move || engine.snapshot().settings().attach_enabled,
-        state.mode.clone(),
+        vec![state.mode.clone(), state.https_mode.clone()],
         state.ports.clone(),
         stop.clone(),
     ));
@@ -185,6 +312,12 @@ fn foreground_attach<'a>(
         ledger: ledger.to_owned(),
         owner: None,
         hook: None,
+        // A user-writable nginx runs as this user and can read the store.
+        cert_dir: attach::CertDir::Existing(
+            ledger
+                .parent()
+                .map_or_else(|| PathBuf::from("certs"), |d| d.join("certs")),
+        ),
         yes: false,
         confirm,
     }
@@ -215,14 +348,26 @@ fn attach_in_foreground(
     match foreground_attach(front, ledger, &confirm).attach(settings) {
         Ok(a) => {
             match &a.outcome {
-                attach::Outcome::Attached { wrote, .. } => tracing::info!(
-                    "attached to {}{}",
-                    a.front,
-                    wrote
-                        .as_ref()
-                        .map(|w| format!(" ({})", w.display()))
-                        .unwrap_or_default()
-                ),
+                attach::Outcome::Attached {
+                    wrote,
+                    kept_default,
+                    ..
+                } => {
+                    tracing::info!(
+                        "attached to {}{}",
+                        a.front,
+                        wrote
+                            .as_ref()
+                            .map(|w| format!(" ({})", w.display()))
+                            .unwrap_or_default()
+                    );
+                    for at in kept_default {
+                        tracing::warn!(
+                            "{} keeps its own default server at {at}; requests on that port for hosts it does not serve go there",
+                            a.front
+                        );
+                    }
+                }
                 attach::Outcome::Declined { default_at } => tracing::warn!(
                     "{} keeps its own default server at {default_at}; requests for hosts it does not serve go there",
                     a.front
@@ -294,6 +439,24 @@ fn bind_public(addr: SocketAddr) -> Result<Option<std::net::TcpListener>, Failur
         ))
         .hint("Run proxlet as a system service: sudo proxlet start")
         .hint("Or use a high port: proxlet config listen.http_port 8080")),
+        Err(e) => Err(Failure::new(format!("cannot listen on {addr}: {e}"))),
+    }
+}
+
+/// Binds the HTTPS listener. Unlike the HTTP port, a port that needs
+/// privileges is not fatal: plain HTTP keeps working and the port owner
+/// reports why HTTPS is waiting.
+fn bind_https(addr: SocketAddr) -> Result<Option<std::net::TcpListener>, Failure> {
+    match std::net::TcpListener::bind(addr) {
+        Ok(l) => Ok(Some(l)),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(Failure::new(format!("cannot listen on {addr}: {e}"))),
     }
 }
@@ -384,19 +547,26 @@ async fn handle_connection(stream: UnixStream, state: Arc<State>) {
 async fn handle(state: &Arc<State>, request: Request) -> Reply {
     match request {
         Request::Ping => Reply::ok(),
-        Request::Status => Reply {
-            status: Some(StatusInfo {
-                version: env!("CARGO_PKG_VERSION").into(),
-                pid: std::process::id(),
-                mode: state.mode.borrow().label(state.listen.port()),
-                listen: state.listen.to_string(),
-                internal: state.internal.to_string(),
-                run_by: state.run_by.clone(),
-                uptime_secs: state.started.elapsed().as_secs(),
-                rules: state.engine.snapshot().rule_count(),
-            }),
-            ..Reply::ok()
-        },
+        Request::Status => {
+            let (certs, cert_warnings) = state.certs.summary();
+            Reply {
+                status: Some(StatusInfo {
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    pid: std::process::id(),
+                    mode: state.mode.borrow().label(state.listen.port()),
+                    listen: state.listen.to_string(),
+                    internal: state.internal.to_string(),
+                    run_by: state.run_by.clone(),
+                    uptime_secs: state.started.elapsed().as_secs(),
+                    rules: state.engine.snapshot().rule_count(),
+                    https_mode: state.https_mode.borrow().label(state.https_listen.port()),
+                    https_listen: state.https_listen.to_string(),
+                    certs,
+                    cert_warnings,
+                }),
+                ..Reply::ok()
+            }
+        }
         Request::Apply { change } => {
             let change = match change.into_change() {
                 Ok(c) => c,
@@ -424,6 +594,55 @@ async fn handle(state: &Arc<State>, request: Request) -> Reply {
         }
         Request::Release => port_command(state, ports::Command::Release).await,
         Request::Reclaim => port_command(state, ports::Command::Reclaim).await,
+        Request::Probe => Reply {
+            probe: Some(state.certs.probe()),
+            ..Reply::ok()
+        },
+        Request::Issue {
+            domain,
+            accept_terms,
+        } => match state.certs.issue(&domain, accept_terms).await {
+            Ok(stored) => Reply {
+                cert: Some(CertReply {
+                    domain: stored.domain,
+                    not_after: stored.leaf.not_after,
+                }),
+                ..Reply::ok()
+            },
+            Err(proxlet_cert::acme::AcmeError::TermsNeeded { url }) => Reply {
+                terms: Some(url.unwrap_or_default()),
+                ..Reply::error("the ACME server's terms of service must be accepted first")
+            },
+            Err(e) => Reply::error(e.to_string()),
+        },
+        Request::Renew { domains } => {
+            let renewed = state
+                .certs
+                .renew(&domains, true)
+                .await
+                .into_iter()
+                .map(|r| match r.result {
+                    Ok(s) => RenewReply {
+                        domain: r.domain,
+                        not_after: Some(s.leaf.not_after),
+                        error: None,
+                    },
+                    Err(e) => RenewReply {
+                        domain: r.domain,
+                        not_after: None,
+                        error: Some(e),
+                    },
+                })
+                .collect();
+            Reply {
+                renewed: Some(renewed),
+                ..Reply::ok()
+            }
+        }
+        Request::CertsChanged => {
+            state.certs.reload();
+            Reply::ok()
+        }
     }
 }
 

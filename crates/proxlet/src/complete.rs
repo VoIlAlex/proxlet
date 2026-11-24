@@ -31,6 +31,43 @@ pub fn rule_routes(current: &OsStr) -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// Hosts of existing host rules, for `proxlet cert`.
+#[must_use]
+pub fn rule_hosts(current: &OsStr) -> Vec<CompletionCandidate> {
+    let current = current.to_string_lossy();
+    let Some(config) = current_config() else {
+        return Vec::new();
+    };
+    let mut hosts: Vec<String> = config
+        .rules
+        .iter()
+        .filter_map(|r| r.route.host().map(str::to_owned))
+        .filter(|h| h.starts_with(current.as_ref()))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts.into_iter().map(CompletionCandidate::new).collect()
+}
+
+/// Domains that have certificates, with their expiry as help text.
+#[must_use]
+pub fn cert_domains(current: &OsStr) -> Vec<CompletionCandidate> {
+    let current = current.to_string_lossy();
+    let store = crate::commands::cert::store(&Locations::resolve());
+    let Ok(listing) = store.list() else {
+        return Vec::new();
+    };
+    listing
+        .certs
+        .into_iter()
+        .filter(|c| c.domain.starts_with(current.as_ref()))
+        .map(|c| {
+            let help = format!("expires {}", proxlet_cert::date(c.leaf.not_after));
+            CompletionCandidate::new(c.domain).help(Some(help.into()))
+        })
+        .collect()
+}
+
 /// Setting keys, with their descriptions as help text.
 #[must_use]
 pub fn setting_keys(current: &OsStr) -> Vec<CompletionCandidate> {

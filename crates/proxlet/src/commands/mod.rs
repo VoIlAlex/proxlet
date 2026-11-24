@@ -1,5 +1,6 @@
 //! Command implementations.
 
+pub mod cert;
 pub mod config;
 pub mod handoff;
 pub mod rules;

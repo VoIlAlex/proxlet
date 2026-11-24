@@ -125,7 +125,8 @@ server only describes itself. To add, say, Apache:
    | `is_running`     | Whether the main process runs, without needing root |
    | `service_unit`   | The unit to hook, e.g. `apache2.service`, or `None` |
    | `read`           | Parse the config into `FrontConfig`: server blocks, their ports, names and default flags, and directories included where server blocks may go |
-   | `plan_attach`    | The file to write (a catch-all forwarding to proxlet's internal address) and any line edits to move the default-server flag; an empty plan when the user declines the takeover |
+   | `https_support`  | Whether this installation can terminate TLS with proxlet's certificates (version, TLS module); the reason when it can't |
+   | `plan_attach`    | The file to write (catch-alls on the HTTP port and, when given an `HttpsForward`, on the HTTPS port, forwarding to proxlet's internal address) and any line edits to move default-server flags; a port that keeps its own default gets no block, and a plan with no block is empty |
    | `check`          | Validate the config, e.g. `apachectl configtest` |
    | `reload`         | Reload a running server gracefully |
    | `error_log`      | Where the server logs bind failures |
@@ -134,6 +135,11 @@ server only describes itself. To add, say, Apache:
 
    Mark every file you write with a first line proxlet recognises (nginx uses
    `# Managed by proxlet.`), so `read` can tell proxlet's block from the user's.
+   The HTTPS block must read `<cert_dir>/<name>.pem` (chain and key in one
+   file) for the requested name at handshake time, so new certificates need no
+   reload, and must only accept plain DNS names when building that path.
+   `read` should also fill `worker_user` and `worker_group`, so `start` can let
+   the workers read the certificate directory.
 
 3. **Register it.** Add it to the list of front servers the CLI and daemon try.
 

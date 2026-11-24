@@ -104,7 +104,24 @@ fn run_without_a_terminal_keeps_nginxs_default_server() {
     let before = home.nginx_tree();
     let daemon = home.start();
     daemon.wait_for_log("keeps its own default server", Duration::from_secs(5));
-    assert_eq!(home.nginx_tree(), before);
+    // nginx's own files are untouched; only HTTPS, which had no default
+    // server, gets proxlet's block.
+    let after = home.nginx_tree();
+    let added: Vec<_> = after.iter().filter(|f| !before.contains(f)).collect();
+    assert_eq!(added.len(), 1, "{added:?}");
+    let (path, block) = added[0];
+    assert!(path.ends_with("conf.d/proxlet.conf"), "{path:?}");
+    assert!(
+        block.contains(&format!("listen {} ssl default_server;", home.https_port)),
+        "{block}"
+    );
+    assert!(
+        !block.contains(&format!("listen {} default_server;", home.port)),
+        "{block}"
+    );
+    assert!(before.iter().all(|f| after.contains(f)));
+    assert_eq!(daemon.stop(), 0);
+    assert_eq!(home.nginx_tree(), before, "restored on exit");
 }
 
 #[test]
@@ -191,4 +208,58 @@ fn a_bind_failure_in_nginxs_log_hands_the_port_over() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn an_attach_from_before_https_says_how_to_forward_it() {
+    let home = Home::with_nginx(false);
+    // proxlet's block and a ledger written before HTTPS forwarding existed.
+    let conf_d = home.path().join("nginx/conf.d");
+    std::fs::write(
+        conf_d.join("proxlet.conf"),
+        format!(
+            "# Managed by proxlet. Removed by `sudo proxlet stop`.\nserver {{\n    listen {} default_server;\n}}\n",
+            home.port
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.path().join("state")).unwrap();
+    std::fs::write(
+        home.path().join("state/front.json"),
+        format!(
+            r#"{{"front":"nginx","port":{},"internal":"127.0.0.1:{}","entries":[]}}"#,
+            home.port, home.internal_port
+        ),
+    )
+    .unwrap();
+    let mode = |m| {
+        let perms = <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(m);
+        std::fs::set_permissions(&conf_d, perms).unwrap();
+    };
+    mode(0o555);
+
+    let holder_home = Home::new();
+    holder_home
+        .run(&["config", "listen.http_port", &home.port.to_string()])
+        .ok();
+    let _nginx = holder_home.start_as(&holder_home.binary_named_nginx());
+    let _daemon = home.start();
+    home.wait_for_status("mode    attached (nginx)", Duration::from_secs(10));
+    let status = home.run(&["status"]);
+    assert!(
+        status
+            .stderr
+            .contains("HTTPS is not forwarded to proxlet yet")
+            && status.stderr.contains("sudo proxlet start"),
+        "{}",
+        status.stderr
+    );
+    assert!(
+        !status
+            .stderr
+            .contains("nginx is not forwarding to proxlet yet"),
+        "{}",
+        status.stderr
+    );
+    mode(0o755);
 }

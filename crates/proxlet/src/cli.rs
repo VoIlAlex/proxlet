@@ -62,10 +62,21 @@ pub enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Obtain a Let's Encrypt certificate for a domain
+    /// Get Let's Encrypt certificates: `proxlet cert <domain>…`, or `ls`, `rm`, `renew`
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "Examples:\n  proxlet cert example.com\n  proxlet cert ls\n  proxlet cert renew example.com\n  proxlet cert rm example.com"
+    )]
     Cert {
-        /// The domain to issue a certificate for
-        domain: String,
+        /// What to do instead of getting certificates.
+        #[command(subcommand)]
+        action: Option<CertAction>,
+        /// Domains to get a certificate for; omit to list certificates
+        #[arg(add = ArgValueCompleter::new(complete::rule_hosts))]
+        domains: Vec<String>,
+        /// Accept the certificate authority's terms of service without asking
+        #[arg(long, short)]
+        yes: bool,
     },
     /// Live table of rules with traffic stats
     Monitor,
@@ -91,6 +102,25 @@ pub enum Command {
     },
 }
 
+/// `proxlet cert` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum CertAction {
+    /// List certificates with their expiry
+    Ls,
+    /// Delete certificates
+    Rm {
+        /// The domains whose certificates to delete
+        #[arg(required = true, add = ArgValueCompleter::new(complete::cert_domains))]
+        domains: Vec<String>,
+    },
+    /// Renew certificates now, even if they are not due (all when none given)
+    Renew {
+        /// The domains to renew; omit for every certificate
+        #[arg(add = ArgValueCompleter::new(complete::cert_domains))]
+        domains: Vec<String>,
+    },
+}
+
 /// What `proxlet handoff` asks the daemon to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum HandoffAction {
@@ -108,6 +138,38 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cert_parses_domains_and_subcommands() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["proxlet", "cert"];
+            all.extend_from_slice(args);
+            match Cli::try_parse_from(all).unwrap().command {
+                Command::Cert {
+                    action,
+                    domains,
+                    yes,
+                } => (action, domains, yes),
+                other => panic!("expected cert, got {other:?}"),
+            }
+        };
+        let (action, domains, yes) = parse(&["a.example.com", "b.example.com", "--yes"]);
+        assert!(action.is_none() && yes);
+        assert_eq!(domains, ["a.example.com", "b.example.com"]);
+        assert!(matches!(parse(&["ls"]).0, Some(CertAction::Ls)));
+        assert!(matches!(
+            parse(&["rm", "a.example.com"]).0,
+            Some(CertAction::Rm { domains }) if domains == ["a.example.com"]
+        ));
+        assert!(matches!(
+            parse(&["renew"]).0,
+            Some(CertAction::Renew { domains }) if domains.is_empty()
+        ));
+        let (action, domains, _) = parse(&[]);
+        assert!(action.is_none() && domains.is_empty());
+        // `rm` needs a domain.
+        assert!(Cli::try_parse_from(["proxlet", "cert", "rm"]).is_err());
     }
 
     #[test]

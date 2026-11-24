@@ -98,19 +98,25 @@ proxlet config static.listing         # print one value
 proxlet config static.listing off     # change it
 ```
 
-| Setting                 | Default   | Applies     | What it does                                            |
-| ----------------------- | --------- | ----------- | ------------------------------------------------------- |
-| `listen.address`        | `0.0.0.0` | on restart  | Address the HTTP listener binds to                      |
-| `listen.http_port`      | `80`      | on restart  | Port the HTTP listener binds to                         |
-| `static.listing`        | `on`      | immediately | List directories that have no `index.html`              |
-| `static.dotfiles`       | `off`     | immediately | Serve and list files whose name starts with a dot       |
-| `proxy.connect_timeout` | `5s`      | immediately | How long to wait for an upstream to accept a connection |
-| `proxy.timeout`         | `60s`     | immediately | How long to wait for an upstream to start responding    |
-| `attach.enabled`        | `on`      | immediately | Attach behind nginx when it holds or wants the port     |
-| `attach.port`           | `47080`   | on restart  | Loopback port nginx forwards to when proxlet is attached |
+| Setting                 | Default      | Applies     | What it does                                                   |
+| ----------------------- | ------------ | ----------- | -------------------------------------------------------------- |
+| `listen.address`        | `0.0.0.0`    | on restart  | Address the HTTP and HTTPS listeners bind to                   |
+| `listen.http_port`      | `80`         | on restart  | Port the HTTP listener binds to                                |
+| `listen.https_port`     | `443`        | on restart  | Port the HTTPS listener binds to                               |
+| `static.listing`        | `on`         | immediately | List directories that have no `index.html`                     |
+| `static.dotfiles`       | `off`        | immediately | Serve and list files whose name starts with a dot              |
+| `proxy.connect_timeout` | `5s`         | immediately | How long to wait for an upstream to accept a connection        |
+| `proxy.timeout`         | `60s`        | immediately | How long to wait for an upstream to start responding           |
+| `attach.enabled`        | `on`         | immediately | Attach behind nginx when it holds or wants the port            |
+| `attach.port`           | `47080`      | on restart  | Loopback port nginx forwards to when proxlet is attached       |
+| `tls.redirect`          | `on`         | immediately | Redirect plain HTTP to HTTPS for hosts that have a certificate |
+| `cert.server`           | `production` | immediately | Where certificates come from: `production`, `staging` or a URL |
 
 Booleans accept `on`/`off` and `true`/`false`. Durations are a number with `ms`,
-`s` or `m`, for example `500ms`, `30s` or `2m`.
+`s` or `m`, for example `500ms`, `30s` or `2m`. `cert.server` is `production`
+(Let's Encrypt), `staging` (Let's Encrypt's test environment, whose
+certificates browsers do not trust) or the `https://` directory URL of any ACME
+server. The HTTP, HTTPS and attach ports must all differ.
 
 ## Running
 
@@ -167,17 +173,98 @@ Installed files on systemd:
 The unit is regenerated on every `proxlet start`, so after upgrading or moving
 the binary just run `sudo proxlet start` again.
 
+## HTTPS and certificates
+
+proxlet gets certificates from Let's Encrypt and serves HTTPS on port 443 with
+them, choosing the certificate by the name the client asks for.
+
+```sh
+proxlet add app.example.com 3000
+proxlet cert app.example.com     # ✓ Certificate for app.example.com, valid until 2027-02-22
+curl https://app.example.com/
+```
+
+For this to work, `app.example.com` must be a public name whose DNS points to
+this machine, and port 80 must reach proxlet from the internet: Let's Encrypt
+checks that you control the name by fetching a token from
+`http://app.example.com/.well-known/acme-challenge/`, and the running proxlet
+answers it. So proxlet must be running (`proxlet start` or `proxlet run`).
+
+### Checks before asking Let's Encrypt
+
+Let's Encrypt limits failed attempts (five per name per hour), so `proxlet
+cert` first checks what it can and tells you what to fix:
+
+| Check                    | When it fails                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| The name is public       | `.test`, `.local`, `.localhost`, `.internal`, `.example`, IP addresses, `*.` |
+| The name resolves        | add an `A` or `AAAA` record pointing to this machine                          |
+| nginx does not serve it  | nginx would answer the challenge instead of proxlet; the file and line shown |
+| A probe reaches proxlet  | the name answers from another server; its address is shown                    |
+
+If the probe cannot be sent from this machine at all (common behind NAT,
+which often cannot reach its own public address), `proxlet cert` warns and
+asks Let's Encrypt anyway.
+
+The first time, you are asked to accept Let's Encrypt's terms of service;
+`--yes` accepts them without a prompt. proxlet never asks for or sends an email
+address. Let's Encrypt no longer sends expiry emails; `proxlet status` and
+`proxlet cert ls` show expiry instead.
+
+### Managing certificates
+
+```sh
+proxlet cert ls                    # domain, expiry, days left, notes
+proxlet cert renew app.example.com # renew now (all certificates when none given)
+proxlet cert rm app.example.com    # delete it; HTTPS for that name stops
+```
+
+The server renews each certificate when a third of its lifetime is left (30
+days for a 90-day certificate), checking twice a day. A failed renewal keeps
+the old certificate, is logged, retried after 1, 2, 4 and then every 6 hours,
+and shown in `cert ls` and `status`. New and renewed certificates take effect
+without a restart and without closing open connections.
+
+To experiment without touching Let's Encrypt's limits, use its staging
+environment (browsers do not trust its certificates; `cert ls` marks them):
+
+```sh
+proxlet config cert.server staging
+```
+
+`cert.server` also takes the `https://` directory URL of any other ACME server
+that does not need an account binding.
+
+### Plain HTTP and the redirect
+
+Once a host has a certificate, plain HTTP requests for it get a `308` redirect
+to HTTPS, keeping the path and query. ACME challenges are never redirected, and
+nothing is redirected while HTTPS is not actually being served (for example
+while another program holds port 443). Turn it off with
+`proxlet config tls.redirect off`.
+
+Port 443 follows the same rules as port 80: proxlet listens on it when it is
+free, serves behind nginx when nginx holds it, and waits when anything else
+does. `proxlet status` shows it on the `https` line. Without root on Linux,
+binding 443 fails; set `listen.https_port` to a high port, as with
+`listen.http_port`.
+
 ## Behind nginx
 
-proxlet and nginx can share port 80. nginx keeps serving its own sites, and
-every request for a host nginx does not serve goes to proxlet.
+proxlet and nginx can share ports 80 and 443. nginx keeps serving its own
+sites, and every request for a host nginx does not serve goes to proxlet, over
+plain HTTP and over HTTPS.
 
 ```sh
 sudo proxlet start          # attaches if nginx is installed
 proxlet status              # mode    attached (nginx)
+                            # https   attached (nginx)
 ```
 
 ### Who holds port 80
+
+Port 443 follows exactly the same rules; nginx starting or stopping hands over
+or takes back both ports together.
 
 | Situation                      | proxlet                                                        |
 | ------------------------------ | -------------------------------------------------------------- |
@@ -203,13 +290,27 @@ proxlet hears about nginx starting in two ways:
 ### What proxlet changes in nginx
 
 `sudo proxlet start` writes one file into the first directory nginx's `http`
-block includes, such as `/etc/nginx/conf.d/proxlet.conf`. It is a server block
-marked `default_server` that forwards to proxlet with the original `Host`,
-`X-Forwarded-For` and `X-Forwarded-Proto`, WebSocket upgrades, and no
-buffering.
+block includes, such as `/etc/nginx/conf.d/proxlet.conf`. It holds two server
+blocks marked `default_server`, one for port 80 and one for port 443, that
+forward to proxlet with the original `Host`, `X-Forwarded-For` and
+`X-Forwarded-Proto`, WebSocket upgrades, and no buffering.
 
-If another nginx server is already the default for port 80 (Debian and Ubuntu
-ship one), proxlet names it and asks:
+The port 443 block terminates TLS with proxlet's certificate for the name the
+client asks for, which nginx reads when the connection is made. So a new
+`proxlet cert` works through nginx right away, with no reload, and nginx's own
+HTTPS sites keep their own certificates. A name proxlet has no certificate for
+fails the handshake (nginx logs it). This needs nginx 1.15.9 or newer built
+with TLS; with an older nginx, only the port 80 block is written and `start`
+says so.
+
+nginx's workers cannot read proxlet's state directory in your home, so
+`sudo proxlet start` creates `/var/lib/proxlet/nginx-certs` (yours, readable by
+nginx's worker group, mode `2750`) and the server keeps a copy of each
+certificate there, removed with the certificate. `sudo proxlet stop` deletes
+the directory.
+
+If another nginx server is already the default for port 80 or 443 (Debian and
+Ubuntu ship one for port 80), proxlet names each of them and asks once:
 
 ```text
 ? nginx sends requests for hosts it does not serve to its default server at
@@ -218,15 +319,17 @@ ship one), proxlet names it and asks:
 
 - **Yes** (or `sudo proxlet start --yes`): proxlet removes `default_server` from
   that line and puts it on its own block.
-- **No**, or no terminal: proxlet changes nothing in nginx, and requests for
-  hosts nginx does not serve keep going to nginx's default server.
+- **No**, or no terminal: those ports keep nginx's default server, and
+  requests on them for hosts nginx does not serve keep going there. A port
+  with no default server of its own still gets proxlet's block.
 
 Every change is checked with `nginx -t`, written atomically, and followed by a
 reload. If any step fails, every file is put back and nginx keeps running its
 previous config.
 
-`sudo proxlet stop` undoes all of it: it removes proxlet's file and the systemd
-drop-in, restores the `default_server` flag, and reloads nginx. If you edited
+`sudo proxlet stop` undoes all of it: it removes proxlet's file, the systemd
+drop-in and the certificate directory, restores the `default_server` flags, and
+reloads nginx. If you edited
 one of those lines in the meantime, proxlet leaves it alone and tells you.
 
 What proxlet changed is recorded in `front.json` in its state directory, so
@@ -260,7 +363,9 @@ empty for other rules.
 `proxlet config attach.enabled off` makes proxlet treat nginx like any other
 process holding the port: it never reads, writes or hooks nginx's config.
 
-HTTPS (port 443) is not attached yet; it arrives with certificates.
+If proxlet attached before it could forward HTTPS, `proxlet status` says
+`HTTPS is not forwarded to proxlet yet`; run `sudo proxlet start` again to add
+the port 443 block.
 
 ## The configuration file
 
@@ -292,6 +397,7 @@ and refuses to overwrite it.
 | ---------------- | -------------------------------- |
 | Configuration    | `~/.config/proxlet/proxlet.toml` |
 | State and socket | `~/.local/state/proxlet/`        |
+| Certificates     | `~/.local/state/proxlet/certs/`  |
 
 - `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are respected.
 - `sudo proxlet ...` uses the invoking user's files, not root's.
