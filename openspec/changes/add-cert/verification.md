@@ -114,8 +114,15 @@ On macOS, `cargo test --workspace` passes, and `cargo clippy --workspace
 | Redirect applies live | `https::terms_then_issue_then_https_and_redirect` |
 | Invalid ACME server | `cli::acme_server_values` |
 
-## Not yet verified
+## CI
 
-- The CI jobs `acme` (new) and `nginx` (extended with HTTPS), and the Pebble
-  crate test they run (task 3.2), have not run yet. They run on the first push
-  of this change.
+All jobs pass on PR #7 (run 45303105359), including `acme` (the Pebble crate
+test, issue, HTTPS, redirect, `wss://`, renew, list, remove) and `nginx` with
+HTTPS (Pebble validating through nginx, the certificate served without a
+reload, nginx's own HTTPS site, port 443 reclaimed when nginx stops, exact
+restore on `stop`).
+
+Two fixes came out of the first runs: the directory fetch for the terms URL
+now sends a User-Agent, which ACME servers may require (Pebble does); and the
+`acme` job's WebSocket route names its host, since host rules win over
+hostless ones.
