@@ -211,8 +211,10 @@ pub(crate) async fn forward(
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
         if let Some(client_side) = client_side {
             let upstream_side = hyper::upgrade::on(&mut resp);
+            let stats = std::sync::Arc::clone(&target.stats);
             tokio::spawn(async move {
                 if let (Ok(a), Ok(b)) = tokio::join!(client_side, upstream_side) {
+                    let _open = crate::stats::Tunnel::open(stats);
                     let mut a = TokioIo::new(a);
                     let mut b = TokioIo::new(b);
                     let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;

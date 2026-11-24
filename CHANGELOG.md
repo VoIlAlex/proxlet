@@ -27,6 +27,8 @@ All notable changes to this project are documented here. The format follows
 - Request logs: every request is recorded (client, method, host, path without the query, status, bytes, duration, rule, upstream or directory, and the proxy error), along with the server's own messages, as JSON lines in `<state>/logs/`. Files rotate at 10 MB and are kept within `log.max_size` (`100MB`) and `log.max_age` (`7d`); recording never holds up a request.
 - `proxlet logs [<selector>]` shows the last 20 records and follows new ones; `--all` prints every stored record, `--json` the stored lines. A selector is a route, a domain or an upstream port, and tab-completes. It works while proxlet is stopped.
 - Settings `log.access`, `log.max_size` and `log.max_age`. Durations accept `h` and `d`; sizes are written `KB`, `MB` or `GB`.
+- Live statistics per rule, kept in the running server's memory: requests per second, totals, 4xx/5xx, upstream errors, p50/p95/p99 latency, bytes sent per second, requests in flight and open WebSockets, plus a row for requests no rule answered. Counting never holds up a request and works with `log.access off`.
+- `proxlet monitor`: a live table refreshed every second, with sorting (`s`), scrolling and reconnection when the server restarts. `--once`, or piping it, prints one plain table.
 
 ### Changed
 

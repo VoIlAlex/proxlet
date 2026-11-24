@@ -10,6 +10,7 @@ mod files;
 mod proxy;
 mod response;
 mod snapshot;
+mod stats;
 pub mod tls;
 
 use std::collections::{HashMap, HashSet};
@@ -17,7 +18,8 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -32,7 +34,9 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 pub use access::{AccessLog, AccessRecord};
-pub use snapshot::{BuildError, Snapshot};
+pub use snapshot::{BuildError, Snapshot, StatsRow};
+use stats::InFlight;
+pub use stats::{RuleStats, Totals};
 
 /// Error type carried by response bodies.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -67,6 +71,7 @@ pub struct Engine {
     challenges: ArcSwap<HashMap<String, String>>,
     tls: ArcSwap<TlsView>,
     access_log: ArcSwap<Option<Arc<dyn AccessLog>>>,
+    connections: AtomicU64,
 }
 
 impl std::fmt::Debug for Engine {
@@ -91,6 +96,7 @@ impl Engine {
             challenges: ArcSwap::from_pointee(HashMap::new()),
             tls: ArcSwap::from_pointee(TlsView::default()),
             access_log: ArcSwap::from_pointee(None),
+            connections: AtomicU64::new(0),
         })
     }
 
@@ -129,8 +135,19 @@ impl Engine {
         self.access_log.store(Arc::new(Some(log)));
     }
 
+    /// Every rule's live statistics, the "no rule" row last, and the number
+    /// of open client connections.
+    #[must_use]
+    pub fn stats(&self) -> StatsSnapshot {
+        StatsSnapshot {
+            connections: self.connections.load(Ordering::Relaxed),
+            rows: self.snapshot.load().stats(),
+        }
+    }
+
     /// Atomically replaces the snapshot. In-flight requests finish on the old one.
-    pub fn replace(&self, snapshot: Snapshot) {
+    pub fn replace(&self, mut snapshot: Snapshot) {
+        snapshot.adopt_stats(&self.snapshot.load());
         let connect_timeout = snapshot.settings.connect_timeout;
         if self.client.load().connect_timeout != connect_timeout {
             self.client.store(Arc::new(ClientSlot {
@@ -159,6 +176,7 @@ impl Engine {
         origin: Origin,
         req: Request<Incoming>,
     ) -> Response<Body> {
+        let start = Instant::now();
         let snap = self.snapshot.load_full();
         let host = req
             .uri()
@@ -177,11 +195,17 @@ impl Engine {
         };
         let pending =
             sink.map(|sink| access::Pending::start(sink, peer, origin, host.as_deref(), &req));
-        let (resp, served) = self.respond(&snap, peer, origin, host, req).await;
-        match pending {
-            Some(p) => p.finish(resp, served),
-            None => resp,
-        }
+        let (resp, mut served) = self.respond(&snap, peer, origin, host, req).await;
+        let in_flight = served
+            .in_flight
+            .take()
+            .unwrap_or_else(|| InFlight::start(Arc::clone(&snap.unmatched)));
+        in_flight.0.record(
+            resp.status().as_u16(),
+            access::upstream_failed(&resp),
+            start.elapsed(),
+        );
+        access::wrap(resp, served, in_flight, pending)
     }
 
     async fn respond(
@@ -207,6 +231,7 @@ impl Engine {
                 let served = access::Served {
                     rule: Some(target.route.clone()),
                     target: Some(target.authority.to_string()),
+                    in_flight: Some(InFlight::start(Arc::clone(&target.stats))),
                 };
                 let client = self.client.load().client.clone();
                 let timeout = snap.settings.proxy_timeout;
@@ -217,6 +242,7 @@ impl Engine {
                 let served = access::Served {
                     rule: Some(target.route.clone()),
                     target: Some(target.root.display().to_string()),
+                    in_flight: Some(InFlight::start(Arc::clone(&target.stats))),
                 };
                 (
                     files::serve(&snap.settings, target, m.prefix, &req).await,
@@ -297,6 +323,31 @@ fn host_name(host: &str) -> &str {
         return host.split_inclusive(']').next().unwrap_or(host);
     }
     host.rsplit_once(':').map_or(host, |(h, _)| h)
+}
+
+/// The engine's live statistics at one moment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatsSnapshot {
+    /// Open client connections, on every listener.
+    pub connections: u64,
+    /// One row per rule in `proxlet ls` order, then the "no rule" row.
+    pub rows: Vec<StatsRow>,
+}
+
+/// Counts one open client connection until dropped.
+struct OpenConnection(Arc<Engine>);
+
+impl OpenConnection {
+    fn new(engine: Arc<Engine>) -> Self {
+        engine.connections.fetch_add(1, Ordering::Relaxed);
+        Self(engine)
+    }
+}
+
+impl Drop for OpenConnection {
+    fn drop(&mut self) {
+        self.0.connections.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Where a connection came from, which decides how forwarding headers are set.
@@ -439,6 +490,7 @@ async fn serve_io<IO>(
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let _open = OpenConnection::new(Arc::clone(&engine));
     let service = service_fn(move |req| {
         let engine = engine.clone();
         async move { Ok::<_, Infallible>(engine.handle_from(peer, origin, req).await) }

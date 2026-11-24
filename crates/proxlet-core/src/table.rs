@@ -62,6 +62,22 @@ impl<T> RuleTable<T> {
         self.len
     }
 
+    /// Every payload, in no particular order.
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.any_host
+            .iter()
+            .chain(self.by_host.values().flatten())
+            .map(|(_, v)| v)
+    }
+
+    /// Every payload, mutably, in no particular order.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.any_host
+            .iter_mut()
+            .chain(self.by_host.values_mut().flatten())
+            .map(|(_, v)| v)
+    }
+
     /// Whether the table has no rules.
     #[must_use]
     pub fn is_empty(&self) -> bool {

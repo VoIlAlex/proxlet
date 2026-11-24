@@ -51,6 +51,8 @@ pub enum Request {
     },
     /// The certificate files changed (e.g. `cert rm`); load them again.
     CertsChanged,
+    /// Live statistics per rule, for `monitor`.
+    Stats,
 }
 
 /// A certificate the daemon just obtained.
@@ -221,8 +223,81 @@ pub struct StatusInfo {
     pub cert_warnings: Vec<String>,
 }
 
+/// Live statistics, for `stats`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StatsReply {
+    /// Seconds since the daemon started.
+    pub uptime_secs: u64,
+    /// Open client connections.
+    pub connections: u64,
+    /// One row per rule in `proxlet ls` order, then the "no rule" row.
+    pub rows: Vec<StatsRow>,
+}
+
+/// One rule's statistics on the wire.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StatsRow {
+    /// The route; `null` for the "no rule" row.
+    pub rule: Option<String>,
+    /// The upstream `host:port` or directory; `null` for the "no rule" row.
+    pub target: Option<String>,
+    /// Requests per second over the last 10 seconds.
+    pub rps: f64,
+    /// Requests since the daemon started.
+    pub total: u64,
+    /// 4xx responses.
+    pub status_4xx: u64,
+    /// 5xx responses.
+    pub status_5xx: u64,
+    /// 502/504 from proxlet failing to reach the upstream.
+    pub upstream_errors: u64,
+    /// Latency percentiles over the last 60 seconds, in milliseconds.
+    pub p50_ms: Option<f64>,
+    /// See `p50_ms`.
+    pub p95_ms: Option<f64>,
+    /// See `p50_ms`.
+    pub p99_ms: Option<f64>,
+    /// Bytes sent per second over the last 10 seconds.
+    pub out_bps: f64,
+    /// Requests in flight.
+    pub in_flight: u32,
+    /// Open WebSocket tunnels.
+    pub websockets: u32,
+}
+
+impl StatsReply {
+    /// Encodes the engine's statistics.
+    #[must_use]
+    pub fn from_engine(stats: proxlet_server::StatsSnapshot, uptime_secs: u64) -> Self {
+        let millis = |d: Option<std::time::Duration>| d.map(|d| d.as_secs_f64() * 1000.0);
+        Self {
+            uptime_secs,
+            connections: stats.connections,
+            rows: stats
+                .rows
+                .into_iter()
+                .map(|r| StatsRow {
+                    rule: r.rule,
+                    target: r.target,
+                    rps: r.totals.rps,
+                    total: r.totals.total,
+                    status_4xx: r.totals.status_4xx,
+                    status_5xx: r.totals.status_5xx,
+                    upstream_errors: r.totals.upstream_errors,
+                    p50_ms: millis(r.totals.p50),
+                    p95_ms: millis(r.totals.p95),
+                    p99_ms: millis(r.totals.p99),
+                    out_bps: r.totals.out_bps,
+                    in_flight: r.totals.in_flight,
+                    websockets: r.totals.websockets,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A reply from the daemon.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Reply {
     /// Whether the request succeeded.
     pub ok: bool,
@@ -248,6 +323,9 @@ pub struct Reply {
     /// For `renew`: one entry per certificate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renewed: Option<Vec<RenewReply>>,
+    /// Statistics, for `stats`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<StatsReply>,
 }
 
 impl Reply {
@@ -319,6 +397,53 @@ pub fn running(socket: &Path) -> Option<StatusInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_wire_format_is_stable() {
+        assert_eq!(
+            serde_json::to_string(&Request::Stats).unwrap(),
+            r#"{"cmd":"stats"}"#
+        );
+        let reply = Reply {
+            stats: Some(StatsReply {
+                uptime_secs: 120,
+                connections: 3,
+                rows: vec![
+                    StatsRow {
+                        rule: Some("/api".into()),
+                        target: Some("127.0.0.1:8000".into()),
+                        rps: 4.5,
+                        total: 512,
+                        status_4xx: 3,
+                        status_5xx: 1,
+                        upstream_errors: 1,
+                        p50_ms: Some(12.5),
+                        p95_ms: Some(40.0),
+                        p99_ms: Some(88.0),
+                        out_bps: 20480.0,
+                        in_flight: 1,
+                        websockets: 0,
+                    },
+                    StatsRow::default(),
+                ],
+            }),
+            ..Reply::ok()
+        };
+        assert_eq!(
+            serde_json::to_string(&reply).unwrap(),
+            concat!(
+                r#"{"ok":true,"stats":{"uptime_secs":120,"connections":3,"rows":["#,
+                r#"{"rule":"/api","target":"127.0.0.1:8000","rps":4.5,"total":512,"#,
+                r#""status_4xx":3,"status_5xx":1,"upstream_errors":1,"#,
+                r#""p50_ms":12.5,"p95_ms":40.0,"p99_ms":88.0,"out_bps":20480.0,"#,
+                r#""in_flight":1,"websockets":0},"#,
+                r#"{"rule":null,"target":null,"rps":0.0,"total":0,"#,
+                r#""status_4xx":0,"status_5xx":0,"upstream_errors":0,"#,
+                r#""p50_ms":null,"p95_ms":null,"p99_ms":null,"out_bps":0.0,"#,
+                r#""in_flight":0,"websockets":0}]}}"#
+            )
+        );
+    }
 
     #[test]
     fn wire_format_is_stable() {

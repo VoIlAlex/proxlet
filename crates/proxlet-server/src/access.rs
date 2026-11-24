@@ -11,6 +11,7 @@ use bytes::Bytes;
 use http::Request;
 use hyper::body::{Body as HttpBody, Frame, SizeHint};
 
+use crate::stats::InFlight;
 use crate::{Body, BoxError, Origin};
 
 /// What the server did with one request.
@@ -53,11 +54,13 @@ pub trait AccessLog: Send + Sync {
 #[derive(Debug, Clone)]
 pub(crate) struct UpstreamError(pub String);
 
-/// Who answered a request, as the record names it.
+/// Who answered a request, as the record names it, and the matched rule's
+/// in-flight count (statistics).
 #[derive(Debug, Default)]
 pub(crate) struct Served {
     pub rule: Option<String>,
     pub target: Option<String>,
+    pub in_flight: Option<InFlight>,
 }
 
 impl Served {
@@ -65,6 +68,7 @@ impl Served {
         Self {
             rule: None,
             target: Some(target.to_owned()),
+            in_flight: None,
         }
     }
 }
@@ -102,24 +106,38 @@ impl Pending {
             },
         }
     }
+}
 
-    /// Wraps the response body so the record is emitted when it ends.
-    pub(crate) fn finish(
-        mut self,
-        resp: http::Response<Body>,
-        served: Served,
-    ) -> http::Response<Body> {
-        let (mut parts, body) = resp.into_parts();
-        self.record.status = parts.status.as_u16();
-        self.record.rule = served.rule;
-        self.record.target = served.target;
-        self.record.error = parts.extensions.remove::<UpstreamError>().map(|e| e.0);
-        let counted = Counted {
-            inner: body,
-            pending: Some(self),
-        };
-        http::Response::from_parts(parts, http_body_util::BodyExt::boxed(counted))
-    }
+/// Wraps the response body so that bytes sent are counted in the rule's
+/// statistics, the in-flight count ends with the body, and the access record
+/// (when logging) is emitted when it ends.
+pub(crate) fn wrap(
+    resp: http::Response<Body>,
+    served: Served,
+    in_flight: InFlight,
+    pending: Option<Pending>,
+) -> http::Response<Body> {
+    let (mut parts, body) = resp.into_parts();
+    let error = parts.extensions.remove::<UpstreamError>().map(|e| e.0);
+    let pending = pending.map(|mut p| {
+        p.record.status = parts.status.as_u16();
+        p.record.rule = served.rule;
+        p.record.target = served.target;
+        p.record.error = error;
+        p
+    });
+    let counted = Counted {
+        inner: body,
+        pending,
+        in_flight,
+    };
+    http::Response::from_parts(parts, http_body_util::BodyExt::boxed(counted))
+}
+
+/// Whether proxlet itself failed to reach the upstream (502/504).
+pub(crate) fn upstream_failed(resp: &http::Response<Body>) -> bool {
+    matches!(resp.status().as_u16(), 502 | 504)
+        && resp.extensions().get::<UpstreamError>().is_some()
 }
 
 fn client<B>(peer: SocketAddr, origin: Origin, req: &Request<B>) -> String {
@@ -142,6 +160,7 @@ fn client<B>(peer: SocketAddr, origin: Origin, req: &Request<B>) -> String {
 struct Counted {
     inner: Body,
     pending: Option<Pending>,
+    in_flight: InFlight,
 }
 
 impl HttpBody for Counted {
@@ -155,9 +174,12 @@ impl HttpBody for Counted {
         let polled = Pin::new(&mut self.inner).poll_frame(cx);
         if let Poll::Ready(Some(Ok(frame))) = &polled
             && let Some(data) = frame.data_ref()
-            && let Some(p) = self.pending.as_mut()
         {
-            p.record.bytes += data.len() as u64;
+            let n = data.len() as u64;
+            self.in_flight.0.record_bytes(n);
+            if let Some(p) = self.pending.as_mut() {
+                p.record.bytes += n;
+            }
         }
         polled
     }

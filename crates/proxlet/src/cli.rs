@@ -86,8 +86,15 @@ pub enum Command {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Live table of rules with traffic stats
-    Monitor,
+    /// Live table of rules with traffic stats: rates, errors and latency
+    #[command(
+        after_help = "Keys: s sort, ↑↓ PgUp PgDn scroll, q quit.\n\nExamples:\n  proxlet monitor\n  proxlet monitor --once\n  proxlet monitor | grep /api"
+    )]
+    Monitor {
+        /// Print the table once and exit (the default when piped)
+        #[arg(long)]
+        once: bool,
+    },
     /// Connect proxlet to installed AI tools (registers its MCP server)
     Ai,
     /// Show or change settings: `proxlet config [KEY [VALUE]]`
@@ -178,6 +185,21 @@ mod tests {
         assert!(action.is_none() && domains.is_empty());
         // `rm` needs a domain.
         assert!(Cli::try_parse_from(["proxlet", "cert", "rm"]).is_err());
+    }
+
+    #[test]
+    fn monitor_parses_once() {
+        let once = |args: &[&str]| {
+            let mut all = vec!["proxlet", "monitor"];
+            all.extend_from_slice(args);
+            match Cli::try_parse_from(all).unwrap().command {
+                Command::Monitor { once } => once,
+                other => panic!("expected monitor, got {other:?}"),
+            }
+        };
+        assert!(!once(&[]));
+        assert!(once(&["--once"]));
+        assert!(Cli::try_parse_from(["proxlet", "monitor", "/api"]).is_err());
     }
 
     #[test]

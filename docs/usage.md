@@ -465,6 +465,45 @@ deleted. Both apply immediately.
 {"t":"2026-11-24T01:06:20.002Z","kind":"event","level":"warn","msg":"port 443 is already in use by caddy (pid 812); waiting for it to be free"}
 ```
 
+## Monitor
+
+`proxlet monitor` shows a live table of your rules with their traffic, one row
+per rule and a last `(no rule)` row for everything no rule answered (no match,
+redirects to HTTPS, certificate challenges). It refreshes every second.
+
+```sh
+proxlet monitor                    # the live table; q to quit
+proxlet monitor --once             # print the table once and exit
+proxlet monitor | grep /api        # plain table when piped
+```
+
+```text
+RULE       TARGET          REQ/S  TOTAL  4XX  5XX  UP-ERR   P50   P95   P99   OUT/S  ACTIVE  WS
+/api       127.0.0.1:8000    4.2    512    3    1       1  12ms  40ms  88ms  20KB/s       1   0
+(no rule)  -                 0.0      2    2    0       0     -     -     -    0B/s       0   0
+```
+
+| Column | What it counts |
+| --- | --- |
+| `REQ/S` | Requests per second over the last 10 seconds |
+| `TOTAL` | Requests since the server started |
+| `4XX`, `5XX` | Responses with those statuses since the server started |
+| `UP-ERR` | 502/504 answers proxlet gave because the upstream could not be reached; an upstream's own 5xx counts under `5XX` only |
+| `P50`, `P95`, `P99` | Latency over the last 60 seconds, from the request arriving to the response headers being ready; `-` without requests |
+| `OUT/S` | Response body bytes sent per second over the last 10 seconds |
+| `ACTIVE` | Requests whose response has not ended yet |
+| `WS` | Open WebSocket connections |
+
+Keys: `s` changes the sort (route, requests per second, errors, p95), the
+arrow keys and `PgUp`/`PgDn` scroll, and `q`, `Esc` or Ctrl-C quit. If the
+server stops while the table is open, it says so and picks up again when the
+server is back.
+
+The numbers live in the running server's memory: counting never slows a
+request down, works with `log.access off`, and starts again from zero when the
+server restarts. A rule keeps its numbers when its target changes; removing
+it and adding it again starts it from zero.
+
 ## The configuration file
 
 Rules and settings live in one TOML file, which you can also edit by hand.

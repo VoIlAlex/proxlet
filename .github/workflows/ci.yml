@@ -108,6 +108,25 @@ jobs:
           # Still readable once the service has stopped.
           sudo "$P" stop
           "$P" logs --all | grep -q "stopped"
+      - name: monitor from the service
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          sudo "$P" start
+          for i in 1 2 3; do curl -fsS http://127.0.0.1/site/ >/dev/null; done
+          curl -s -o /dev/null http://127.0.0.1/nope || true
+
+          "$P" monitor --once | tee /tmp/monitor.txt
+          head -n 1 /tmp/monitor.txt | grep -q "^RULE "
+          awk '$1 == "/site" && $4 >= 3 { found = 1 } END { exit !found }' /tmp/monitor.txt
+          awk '$1 == "(no" && $5 >= 1 { found = 1 } END { exit !found }' /tmp/monitor.txt
+          # Piped without --once: the same plain table, no escape sequences.
+          "$P" monitor | tee /tmp/monitor-piped.txt
+          if grep -q $'\x1b' /tmp/monitor-piped.txt; then echo "escape sequences"; exit 1; fi
+
+          sudo "$P" stop
+          if "$P" monitor 2>/tmp/monitor-err.txt; then echo "monitor without a server"; exit 1; fi
+          grep -q "not running" /tmp/monitor-err.txt
       - name: a taken port means waiting, then taking it
         run: |
           set -euxo pipefail
