@@ -547,21 +547,79 @@ mod tests {
         assert!(a.starts_with("custom-") && a != b, "{a} {b}");
     }
 
-    /// Runs against Pebble when `PEBBLE_DIRECTORY` is set (CI does; see
-    /// `.github/workflows/ci.yml`). `PROXLET_ACME_ROOTS` must trust Pebble's
-    /// TLS certificate, and Pebble must be started with
-    /// `PEBBLE_VA_ALWAYS_VALID=1`, since nothing serves the challenge here.
+    /// Answers HTTP-01 challenges itself on `127.0.0.1:<port>`.
+    #[derive(Clone, Default)]
+    struct ServedSink(Arc<Mutex<std::collections::HashMap<String, String>>>);
+
+    impl ChallengeSink for ServedSink {
+        fn publish(&self, token: &str, key_authorization: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(token.to_owned(), key_authorization.to_owned());
+        }
+        fn withdraw(&self, token: &str) {
+            self.0.lock().unwrap().remove(token);
+        }
+    }
+
+    impl ServedSink {
+        async fn serve(&self, port: u16) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let tokens = self.0.clone();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = listener.accept().await {
+                    let tokens = tokens.clone();
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req.split_whitespace().nth(1).unwrap_or("");
+                        let token = path.rsplit('/').next().unwrap_or("");
+                        let body = tokens.lock().unwrap().get(token).cloned();
+                        let resp = match body {
+                            Some(b) => format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+                                b.len()
+                            ),
+                            None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                        };
+                        let _ = s.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+        }
+    }
+
+    /// Runs against Pebble when `PEBBLE_DIRECTORY` is set (the CI `acme` job
+    /// does; see `.github/workflows/ci.yml`). `PROXLET_ACME_ROOTS` must trust
+    /// Pebble's TLS certificate. This test answers the challenge itself on
+    /// `PEBBLE_HTTP_PORT`, where Pebble validates it (it resolves the name
+    /// to 127.0.0.1 through `pebble-challtestsrv`).
     #[tokio::test]
     async fn pebble_issues_a_certificate() {
         let Some(dir_url) = std::env::var_os("PEBBLE_DIRECTORY") else {
             eprintln!("PEBBLE_DIRECTORY not set; skipping");
             return;
         };
+        let port: u16 = std::env::var("PEBBLE_HTTP_PORT")
+            .expect("PEBBLE_HTTP_PORT")
+            .parse()
+            .unwrap();
+        let sink = ServedSink::default();
+        sink.serve(port).await;
+
         let server = AcmeServer::Url(dir_url.to_string_lossy().into_owned());
         let tmp = tempfile::tempdir().unwrap();
         let ca = AcmeCa::new(&server, tmp.path(), Http::from_env().unwrap());
+        assert!(
+            ca.terms_url().await.unwrap().is_some(),
+            "Pebble publishes terms"
+        );
         let store = Store::new(tmp.path().join("certs"));
-        let sink = Recorder::default();
         let err = obtain(&ca, &store, "pebble.example.org", "custom", &sink, false)
             .await
             .unwrap_err();
@@ -576,5 +634,11 @@ mod tests {
                 .join("account.json")
                 .exists()
         );
+        // A second order reuses the stored account.
+        let ca = AcmeCa::new(&server, tmp.path(), Http::from_env().unwrap());
+        obtain(&ca, &store, "pebble.example.org", "custom", &sink, false)
+            .await
+            .unwrap();
+        assert!(sink.0.lock().unwrap().is_empty(), "tokens withdrawn");
     }
 }

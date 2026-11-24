@@ -8,8 +8,9 @@ a path or a domain to a local port or a folder. It runs on its own, or attaches
 to an nginx that already owns ports 80 and 443.
 
 > **Status: early development.** Rules, proxying, static files, settings, the
-> system service and attaching behind nginx work today; the rest of the
-> commands below are being built change by change. See [Roadmap](#roadmap).
+> system service, attaching behind nginx, and Let's Encrypt certificates with
+> HTTPS work today; the rest of the commands below are being built change by
+> change. See [Roadmap](#roadmap).
 
 ## What it looks like
 
@@ -27,7 +28,7 @@ proxlet status                     # running? standalone or attached to nginx?
 proxlet logs /api                  # follow logs for a route, a domain or a port
 proxlet logs --all | grep 502      # dump everything for grep
 proxlet monitor                    # live table: rps, errors, latency per rule
-proxlet cert example.com           # Let's Encrypt certificate
+proxlet cert example.com           # Let's Encrypt certificate, HTTPS, auto-renewed
 proxlet ai                         # register the proxlet MCP server with your AI tools
 proxlet config static.listing off  # change a setting
 ```
@@ -40,12 +41,17 @@ settings and where proxlet keeps its files.
 
 ## How it works
 
-- **Standalone:** proxlet listens on port 80 itself.
+- **Standalone:** proxlet listens on ports 80 and 443 itself.
 - **Attached:** if nginx holds the port, or starts later, proxlet hands it over
   and installs a single catch-all in nginx that forwards otherwise-unclaimed
   traffic to proxlet. When nginx stops, proxlet takes the port back. Routing,
   logs and stats stay in proxlet, so rules apply instantly without reloading
-  nginx. `sudo proxlet stop` restores nginx's config exactly.
+  nginx. HTTPS works the same way: nginx terminates TLS for unclaimed names
+  with proxlet's own certificates, read per connection, so a new certificate
+  needs no nginx reload. `sudo proxlet stop` restores nginx's config exactly.
+- **Certificates:** `proxlet cert example.com` checks the name, then gets a
+  certificate from Let's Encrypt, answering the challenge itself. Renewal is
+  automatic; plain HTTP redirects to HTTPS for hosts that have one.
 - If the port is held by something that is not a supported server, proxlet
   says what is in the way and takes the port as soon as it is free.
 
@@ -81,8 +87,8 @@ Work is specified with [OpenSpec](https://github.com/Fission-AI/OpenSpec) under
 [`openspec/`](openspec/), one change per slice:
 
 1. **Core** — rules, standalone serving (proxy + static files), `start`/`stop`/`status`, `config` *(done)*
-2. **nginx attach** — port handoff, catch-all install, conflict warnings *(in progress)*
-3. **Certificates** — Let's Encrypt issuance and renewal, HTTPS
+2. **nginx attach** — port handoff, catch-all install, conflict warnings *(done)*
+3. **Certificates** — Let's Encrypt issuance and renewal, HTTPS *(in progress)*
 4. **Logs** — structured access and error logs, `proxlet logs`
 5. **Monitor** — live stats TUI
 6. **AI tools** — MCP server and `proxlet ai`
@@ -95,6 +101,7 @@ Work is specified with [OpenSpec](https://github.com/Fission-AI/OpenSpec) under
 | `crates/proxlet-core` | Rule model, matching, configuration |
 | `crates/proxlet-server` | Proxy and static file engine |
 | `crates/proxlet-front` | Front servers for attach mode (nginx first) |
+| `crates/proxlet-cert` | Certificates: ACME issuance, storage, renewal |
 | `crates/proxlet-service` | System service managers (systemd first) |
 | `crates/proxlet-ai` | AI tool integrations |
 

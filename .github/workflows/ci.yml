@@ -123,7 +123,10 @@ jobs:
           # The runner image ships nginx with its service disabled.
           sudo systemctl enable --now nginx
           systemctl is-active nginx
-          printf 'server {\n    listen 80;\n    server_name site.test;\n    return 200 "from nginx\\n";\n}\n' \
+          # nginx's own site, over HTTP and HTTPS (self-signed).
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=site.test \
+            -keyout /etc/nginx/site.key -out /etc/nginx/site.crt
+          printf 'server {\n    listen 80;\n    server_name site.test;\n    listen 443 ssl;\n    ssl_certificate /etc/nginx/site.crt;\n    ssl_certificate_key /etc/nginx/site.key;\n    return 200 "from nginx\\n";\n}\n' \
             | sudo tee /etc/nginx/sites-enabled/site
           sudo nginx -t
           sudo systemctl reload nginx
@@ -153,6 +156,32 @@ jobs:
           python3 .github/scripts/ws_echo.py serve 9001 &
           sleep 1
           python3 .github/scripts/ws_echo.py send 127.0.0.1 80 other.test /ws hello-ws | grep -qx hello-ws
+      - name: https through nginx
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          "$P" status | tee /dev/stderr | grep -q "https   attached (nginx)"
+          grep -q "listen 443 ssl default_server;" /etc/nginx/conf.d/proxlet.conf
+          test -d /var/lib/proxlet/nginx-certs
+          .github/scripts/pebble.sh 80
+          echo "127.0.0.1 app.example.org" | sudo tee -a /etc/hosts
+          "$P" config cert.server https://localhost:14000/dir
+          # The service must trust Pebble's own HTTPS.
+          sudo mkdir -p /etc/systemd/system/proxlet.service.d
+          printf '[Service]\nEnvironment=PROXLET_ACME_ROOTS=/tmp/pebble/minica.pem\n' \
+            | sudo tee /etc/systemd/system/proxlet.service.d/ci.conf
+          sudo systemctl daemon-reload
+          sudo systemctl restart proxlet
+          for i in $(seq 50); do "$P" status | grep -q "https   attached (nginx)" && break; sleep 0.2; done
+          # Pebble validates through nginx on port 80; no nginx reload follows.
+          "$P" cert app.example.org --yes | tee /dev/stderr | grep -q "✓ Certificate for app.example.org"
+          sudo test -f /var/lib/proxlet/nginx-certs/app.example.org.pem
+          curl -fsS --cacert /tmp/pebble/root.pem --resolve app.example.org:443:127.0.0.1 \
+            https://app.example.org/site/ | grep -q "hello from proxlet"
+          # nginx's own HTTPS site keeps its own certificate.
+          curl -fsSk --resolve site.test:443:127.0.0.1 https://site.test/ | grep -q "from nginx"
+          curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: app.example.org' \
+            http://127.0.0.1/site/ | tee /dev/stderr | grep -qx "308 https://app.example.org/site/"
       - name: nginx stops and starts as a service
         run: |
           set -euxo pipefail
@@ -161,6 +190,10 @@ jobs:
           for i in $(seq 25); do "$P" status | grep -q "mode    standalone" && break; sleep 0.2; done
           "$P" status | grep -q "mode    standalone"
           curl -fsS http://127.0.0.1/site/ | grep -q "hello from proxlet"
+          # proxlet serves HTTPS itself once nginx lets go of port 443.
+          for i in $(seq 25); do "$P" status | grep -q "https   https://" && break; sleep 0.2; done
+          curl -fsS --cacert /tmp/pebble/root.pem --resolve app.example.org:443:127.0.0.1 \
+            https://app.example.org/site/ | grep -q "hello from proxlet"
           sudo systemctl start nginx
           systemctl is-active nginx
           for i in $(seq 50); do "$P" status | grep -q "attached (nginx)" && break; sleep 0.2; done
@@ -194,6 +227,7 @@ jobs:
           sudo "$P" stop
           sudo diff -r /tmp/nginx-before /etc/nginx
           test ! -e /etc/systemd/system/nginx.service.d/proxlet.conf
+          test ! -e /var/lib/proxlet/nginx-certs
           sudo nginx -t
           if curl -s -H 'Host: other.test' http://127.0.0.1/ | grep -q proxlet; then exit 1; fi
       - name: logs
@@ -201,6 +235,67 @@ jobs:
         run: |
           sudo journalctl -u proxlet.service -u nginx.service --no-pager -n 200
           sudo tail -n 50 /var/log/nginx/error.log
+
+  acme:
+    name: certificates with Pebble (end to end)
+    runs-on: ubuntu-latest
+    env:
+      PROXLET_ACME_ROOTS: /tmp/pebble/minica.pem
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: start Pebble
+        run: |
+          .github/scripts/pebble.sh 5002
+          echo "127.0.0.1 app.example.org" | sudo tee -a /etc/hosts
+      - name: the ACME client against Pebble
+        env:
+          PEBBLE_DIRECTORY: https://localhost:14000/dir
+          PEBBLE_HTTP_PORT: "5002"
+        run: cargo test -p proxlet-cert --locked pebble -- --nocapture
+      - name: issue, serve, redirect
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          mkdir -p "$HOME/site"
+          echo "hello over https" > "$HOME/site/index.html"
+          "$P" config listen.http_port 5002
+          "$P" config listen.https_port 5443
+          "$P" config cert.server https://localhost:14000/dir
+          "$P" add app.example.org "$HOME/site"
+          "$P" add /ws 9001
+          "$P" run > /tmp/proxlet.log 2>&1 &
+          for i in $(seq 50); do "$P" status > /dev/null && break; sleep 0.2; done
+          "$P" cert app.example.org --yes | tee /dev/stderr | grep -q "✓ Certificate for app.example.org, valid until"
+          "$P" status | tee /dev/stderr | grep -q "https   https://0.0.0.0:5443 (1 certificate)"
+          curl -fsS --cacert /tmp/pebble/root.pem --resolve app.example.org:5443:127.0.0.1 \
+            https://app.example.org:5443/ | grep -q "hello over https"
+          curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: app.example.org' \
+            'http://127.0.0.1:5002/a?b=1' | tee /dev/stderr | grep -qx "308 https://app.example.org:5443/a?b=1"
+      - name: websocket over https
+        run: |
+          set -euxo pipefail
+          python3 .github/scripts/ws_echo.py serve 9001 &
+          sleep 1
+          python3 .github/scripts/ws_echo.py send 127.0.0.1 5443 app.example.org /ws hello-wss /tmp/pebble/root.pem \
+            | grep -qx hello-wss
+      - name: renew, list, remove
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          "$P" cert renew app.example.org | grep -q "Renewed the certificate for app.example.org"
+          "$P" cert ls | tee /dev/stderr | grep -q "^app.example.org"$'\t'
+          "$P" cert rm app.example.org
+          if curl -fsS --cacert /tmp/pebble/root.pem --resolve app.example.org:5443:127.0.0.1 \
+            https://app.example.org:5443/; then echo "still served after rm"; exit 1; fi
+          "$P" stop
+      - name: logs
+        if: failure()
+        run: |
+          cat /tmp/proxlet.log || true
+          tail -n 100 /tmp/pebble/pebble.log || true
 
   msrv:
     name: msrv (1.89)

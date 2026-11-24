@@ -52,7 +52,7 @@
 
 - [ ] 8.1 Add a CI job `acme` that runs Pebble and `pebble-challtestsrv` on the Ubuntu runner, sets the test domains in `/etc/hosts`, and runs standalone: `proxlet cert` with `--yes`, an HTTPS request with Pebble's root, the redirect, `wss://`, `cert renew`, `cert ls`, `cert rm` (handshake then fails), and the Pebble-gated crate test from 3.2; verify that the job passes
 - [ ] 8.2 Extend the CI `nginx` job with HTTPS: `sudo proxlet start --yes` installs the 443 block, a certificate issued while attached is served through nginx without a reload, nginx's own HTTPS site still works, and `stop` still restores `/etc/nginx` exactly (`diff -r`); verify that the job passes
-- [ ] 8.3 Update `README.md` (status and roadmap) and `CHANGELOG.md` (including the BREAKING redirect default), and write `verification.md` mapping every scenario to its test; verify with `openspec validate add-cert --strict`
+- [x] 8.3 Update `README.md` (status and roadmap) and `CHANGELOG.md` (including the BREAKING redirect default), and write `verification.md` mapping every scenario to its test; verify with `openspec validate add-cert --strict`
 
 ## Workflow follow-up
 
