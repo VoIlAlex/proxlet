@@ -21,6 +21,7 @@ proxlet-core = { version = "0.1.0", path = "../proxlet-core" }
 proxlet-front = { version = "0.1.0", path = "../proxlet-front" }
 proxlet-server = { version = "0.1.0", path = "../proxlet-server" }
 proxlet-service = { version = "0.1.0", path = "../proxlet-service" }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
@@ -33,6 +34,6 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 workspace = true
 
 [dev-dependencies]
-nix = { version = "0.32.0", default-features = false, features = ["signal"] }
+nix = { version = "0.32.0", default-features = false, features = ["signal", "term"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3.27.0"

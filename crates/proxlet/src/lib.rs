@@ -11,6 +11,7 @@ pub mod complete;
 pub mod control;
 pub mod daemon;
 pub mod logs;
+pub mod monitor;
 pub mod output;
 pub mod pipeline;
 pub mod ports;
@@ -96,7 +97,7 @@ fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
             Some(CertAction::Rm { domains }) => commands::cert::rm(locations, domains),
             Some(CertAction::Renew { domains }) => commands::cert::renew(locations, domains),
         },
-        Command::Monitor => not_yet("monitor", "monitor"),
+        Command::Monitor { once } => commands::monitor::run(locations, *once),
         Command::Ai => not_yet("ai", "AI tools"),
     }
 }

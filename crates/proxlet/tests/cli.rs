@@ -398,7 +398,7 @@ fn completion_offers_rules_keys_and_values() {
 #[test]
 fn not_yet_available_commands_say_so() {
     let home = Home::new();
-    let out = home.run(&["monitor"]);
+    let out = home.run(&["ai"]);
     assert_eq!(out.code, 2);
     assert!(out.stderr.contains("not available yet"), "{}", out.stderr);
 }

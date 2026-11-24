@@ -16,7 +16,9 @@ use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::attach;
 use crate::certs::{self, Certs};
-use crate::control::{self, CertReply, RenewReply, Reply, Request, StatusInfo, WireOutcome};
+use crate::control::{
+    self, CertReply, RenewReply, Reply, Request, StatsReply, StatusInfo, WireOutcome,
+};
 use crate::logs::{self, writer::LogSender};
 use crate::output::{CmdResult, Failure};
 use crate::pipeline;
@@ -575,29 +577,42 @@ async fn handle_connection(stream: UnixStream, state: Arc<State>) {
     }
 }
 
+fn status_reply(state: &State) -> Reply {
+    let (certs, cert_warnings) = state.certs.summary();
+    Reply {
+        status: Some(StatusInfo {
+            version: env!("CARGO_PKG_VERSION").into(),
+            pid: std::process::id(),
+            mode: state.mode.borrow().label(state.listen.port()),
+            listen: state.listen.to_string(),
+            internal: state.internal.to_string(),
+            run_by: state.run_by.clone(),
+            uptime_secs: state.started.elapsed().as_secs(),
+            rules: state.engine.snapshot().rule_count(),
+            https_mode: state.https_mode.borrow().label(state.https_listen.port()),
+            https_listen: state.https_listen.to_string(),
+            certs,
+            cert_warnings,
+        }),
+        ..Reply::ok()
+    }
+}
+
+fn stats_reply(state: &State) -> Reply {
+    Reply {
+        stats: Some(StatsReply::from_engine(
+            state.engine.stats(),
+            state.started.elapsed().as_secs(),
+        )),
+        ..Reply::ok()
+    }
+}
+
 async fn handle(state: &Arc<State>, request: Request) -> Reply {
     match request {
         Request::Ping => Reply::ok(),
-        Request::Status => {
-            let (certs, cert_warnings) = state.certs.summary();
-            Reply {
-                status: Some(StatusInfo {
-                    version: env!("CARGO_PKG_VERSION").into(),
-                    pid: std::process::id(),
-                    mode: state.mode.borrow().label(state.listen.port()),
-                    listen: state.listen.to_string(),
-                    internal: state.internal.to_string(),
-                    run_by: state.run_by.clone(),
-                    uptime_secs: state.started.elapsed().as_secs(),
-                    rules: state.engine.snapshot().rule_count(),
-                    https_mode: state.https_mode.borrow().label(state.https_listen.port()),
-                    https_listen: state.https_listen.to_string(),
-                    certs,
-                    cert_warnings,
-                }),
-                ..Reply::ok()
-            }
-        }
+        Request::Stats => stats_reply(state),
+        Request::Status => status_reply(state),
         Request::Apply { change } => {
             let change = match change.into_change() {
                 Ok(c) => c,
