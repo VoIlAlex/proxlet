@@ -34,11 +34,11 @@
 
 ## 6. `proxlet cert` commands (proxlet)
 
-- [ ] 6.1 Add the `cert` command shape (decision 10): `cert <domain>… [--yes]`, `cert ls`, `cert rm <domain>…`, `cert renew [<domain>…]`, replacing the "not yet" stub; verify with CLI parse tests, including that `ls`, `rm` and `renew` are never taken as domains
-- [ ] 6.2 Implement issuing: the name, DNS and nginx checks, the probe (stop on another server's answer, warn on a connection error), the terms prompt (or `--yes`, or exit non-zero without a terminal), one domain at a time, and the exit status; verify with CLI tests for "Certificate issued", "Several domains", "Already has one", "Server not running", "Local name", "Name does not resolve", "Name served by nginx", "Name answered by another server", "Probe cannot be sent", "First issuance" and "No terminal", using the fake CA hook and a fake resolver
-- [ ] 6.3 Implement `cert ls` (table / tab-separated, notes for `staging` and `renewal failing`), `cert rm` (unknown domain lists the known ones; notifies a running daemon) and `cert renew`; verify with CLI tests for "List", "None", "Remove", "Renew now" and "Staging"
-- [ ] 6.4 Add completion: host-rule domains after `cert`, stored domains after `cert rm` and `cert renew`; verify with completion tests for "Complete a domain to remove"
-- [ ] 6.5 Document HTTPS and certificates in `docs/usage.md`: issuing, the checks and what they mean, staging, renewal, the redirect, and rate limits
+- [x] 6.1 Add the `cert` command shape (decision 10): `cert <domain>… [--yes]`, `cert ls`, `cert rm <domain>…`, `cert renew [<domain>…]`, replacing the "not yet" stub; verify with CLI parse tests, including that `ls`, `rm` and `renew` are never taken as domains
+- [x] 6.2 Implement issuing: the name, DNS and nginx checks, the probe (stop on another server's answer, warn on a connection error), the terms prompt (or `--yes`, or exit non-zero without a terminal), one domain at a time, and the exit status; verify with CLI tests for "Certificate issued", "Several domains", "Already has one", "Server not running", "Local name", "Name does not resolve", "Name served by nginx", "Name answered by another server", "Probe cannot be sent", "First issuance" and "No terminal", using the fake CA hook and a fake resolver
+- [x] 6.3 Implement `cert ls` (table / tab-separated, notes for `staging` and `renewal failing`), `cert rm` (unknown domain lists the known ones; notifies a running daemon) and `cert renew`; verify with CLI tests for "List", "None", "Remove", "Renew now" and "Staging"
+- [x] 6.4 Add completion: host-rule domains after `cert`, stored domains after `cert rm` and `cert renew`; verify with completion tests for "Complete a domain to remove"
+- [x] 6.5 Document HTTPS and certificates in `docs/usage.md`: issuing, the checks and what they mean, staging, renewal, the redirect, and rate limits
 
 ## 7. HTTPS behind nginx (proxlet-front, proxlet)
 

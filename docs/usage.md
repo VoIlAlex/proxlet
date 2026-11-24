@@ -173,6 +173,82 @@ Installed files on systemd:
 The unit is regenerated on every `proxlet start`, so after upgrading or moving
 the binary just run `sudo proxlet start` again.
 
+## HTTPS and certificates
+
+proxlet gets certificates from Let's Encrypt and serves HTTPS on port 443 with
+them, choosing the certificate by the name the client asks for.
+
+```sh
+proxlet add app.example.com 3000
+proxlet cert app.example.com     # ✓ Certificate for app.example.com, valid until 2027-02-22
+curl https://app.example.com/
+```
+
+For this to work, `app.example.com` must be a public name whose DNS points to
+this machine, and port 80 must reach proxlet from the internet: Let's Encrypt
+checks that you control the name by fetching a token from
+`http://app.example.com/.well-known/acme-challenge/`, and the running proxlet
+answers it. So proxlet must be running (`proxlet start` or `proxlet run`).
+
+### Checks before asking Let's Encrypt
+
+Let's Encrypt limits failed attempts (five per name per hour), so `proxlet
+cert` first checks what it can and tells you what to fix:
+
+| Check                    | When it fails                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| The name is public       | `.test`, `.local`, `.localhost`, `.internal`, `.example`, IP addresses, `*.` |
+| The name resolves        | add an `A` or `AAAA` record pointing to this machine                          |
+| nginx does not serve it  | nginx would answer the challenge instead of proxlet; the file and line shown |
+| A probe reaches proxlet  | the name answers from another server; its address is shown                    |
+
+If the probe cannot be sent from this machine at all (common behind NAT,
+which often cannot reach its own public address), `proxlet cert` warns and
+asks Let's Encrypt anyway.
+
+The first time, you are asked to accept Let's Encrypt's terms of service;
+`--yes` accepts them without a prompt. proxlet never asks for or sends an email
+address. Let's Encrypt no longer sends expiry emails; `proxlet status` and
+`proxlet cert ls` show expiry instead.
+
+### Managing certificates
+
+```sh
+proxlet cert ls                    # domain, expiry, days left, notes
+proxlet cert renew app.example.com # renew now (all certificates when none given)
+proxlet cert rm app.example.com    # delete it; HTTPS for that name stops
+```
+
+The server renews each certificate when a third of its lifetime is left (30
+days for a 90-day certificate), checking twice a day. A failed renewal keeps
+the old certificate, is logged, retried after 1, 2, 4 and then every 6 hours,
+and shown in `cert ls` and `status`. New and renewed certificates take effect
+without a restart and without closing open connections.
+
+To experiment without touching Let's Encrypt's limits, use its staging
+environment (browsers do not trust its certificates; `cert ls` marks them):
+
+```sh
+proxlet config cert.server staging
+```
+
+`cert.server` also takes the `https://` directory URL of any other ACME server
+that does not need an account binding.
+
+### Plain HTTP and the redirect
+
+Once a host has a certificate, plain HTTP requests for it get a `308` redirect
+to HTTPS, keeping the path and query. ACME challenges are never redirected, and
+nothing is redirected while HTTPS is not actually being served (for example
+while another program holds port 443). Turn it off with
+`proxlet config tls.redirect off`.
+
+Port 443 follows the same rules as port 80: proxlet listens on it when it is
+free, serves behind nginx when nginx holds it, and waits when anything else
+does. `proxlet status` shows it on the `https` line. Without root on Linux,
+binding 443 fails; set `listen.https_port` to a high port, as with
+`listen.http_port`.
+
 ## Behind nginx
 
 proxlet and nginx can share port 80. nginx keeps serving its own sites, and
@@ -298,6 +374,7 @@ and refuses to overwrite it.
 | ---------------- | -------------------------------- |
 | Configuration    | `~/.config/proxlet/proxlet.toml` |
 | State and socket | `~/.local/state/proxlet/`        |
+| Certificates     | `~/.local/state/proxlet/certs/`  |
 
 - `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are respected.
 - `sudo proxlet ...` uses the invoking user's files, not root's.
