@@ -13,10 +13,10 @@
 
 ## 3. Writer, rotation and retention (proxlet)
 
-- [ ] 3.1 Add the record types and their JSON form (decision 1) with the RFC 3339 millisecond timestamp helper; verify with unit tests for the exact JSON of a request, an error request and an event, and for the timestamp at a known instant
-- [ ] 3.2 Add the writer task: bounded queue (8192), `try_send` with a drop counter, buffered writes flushed every 200 ms, a recorded drop event, and an `eprintln!` warning (at most once a minute) with reopening every 5 s on write errors; verify with tests over a temporary directory for ordering, flushing, the drop event, and an unwritable directory never blocking senders
-- [ ] 3.3 Add rotation at the file size limit (10 MB; `PROXLET_TEST_LOG_FILE_BYTES` in tests) and retention by total size and age at startup, after rotation and hourly, reading the limits live from the snapshot; `0700` directory, `0600` files; verify with tests for "Rotation and size limit" (no split records), "Age limit", the current file never being deleted, and "Log limits apply live"
-- [ ] 3.4 Install a `tracing` layer for `proxlet run` that sends info-and-above events from `proxlet*` targets to the writer alongside the stderr output; connect the engine's sink to the writer in the daemon and drain the queue on shutdown; verify with daemon tests that requests and "Port taken" appear in the log files, and that stderr output is unchanged
+- [x] 3.1 Add the record types and their JSON form (decision 1) with the RFC 3339 millisecond timestamp helper; verify with unit tests for the exact JSON of a request, an error request and an event, and for the timestamp at a known instant
+- [x] 3.2 Add the writer task: bounded queue (8192), `try_send` with a drop counter, buffered writes flushed every 200 ms, a recorded drop event, and an `eprintln!` warning (at most once a minute) with reopening every 5 s on write errors; verify with tests over a temporary directory for ordering, flushing, the drop event, and an unwritable directory never blocking senders
+- [x] 3.3 Add rotation at the file size limit (10 MB; `PROXLET_TEST_LOG_FILE_BYTES` in tests) and retention by total size and age at startup, after rotation and hourly, reading the limits live from the snapshot; `0700` directory, `0600` files; verify with tests for "Rotation and size limit" (no split records), "Age limit", the current file never being deleted, and "Log limits apply live"
+- [x] 3.4 Install a `tracing` layer for `proxlet run` that sends info-and-above events from `proxlet*` targets to the writer alongside the stderr output; connect the engine's sink to the writer in the daemon and drain the queue on shutdown; verify with daemon tests that requests and "Port taken" appear in the log files, and that stderr output is unchanged
 
 ## 4. `proxlet logs` (proxlet)
 
