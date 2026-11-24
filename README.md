@@ -9,8 +9,8 @@ to an nginx that already owns ports 80 and 443.
 
 > **Status: early development.** Rules, proxying, static files, settings, the
 > system service, attaching behind nginx, Let's Encrypt certificates with
-> HTTPS, request logs, and the live monitor work today; `ai` is being built
-> next. See [Roadmap](#roadmap).
+> HTTPS, request logs, the live monitor, and the MCP server for AI tools work
+> today. See [Roadmap](#roadmap).
 
 ## What it looks like
 
@@ -91,7 +91,7 @@ Work is specified with [OpenSpec](https://github.com/Fission-AI/OpenSpec) under
 3. **Certificates** — Let's Encrypt issuance and renewal, HTTPS *(done)*
 4. **Logs** — structured access and error logs, `proxlet logs` *(done)*
 5. **Monitor** — live stats TUI *(done)*
-6. **AI tools** — MCP server and `proxlet ai`
+6. **AI tools** — MCP server and `proxlet ai` *(done)*
 
 ## Project layout
 

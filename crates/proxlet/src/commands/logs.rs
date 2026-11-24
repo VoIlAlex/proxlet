@@ -51,10 +51,7 @@ impl Printer {
 
 /// Prints stored records, then follows new ones unless `all` is set.
 pub fn run(locations: &Locations, selector: Option<&str>, all: bool, json: bool) -> CmdResult {
-    let selector = selector
-        .map(Selector::parse)
-        .transpose()
-        .map_err(|e| Failure::new(e).hint("A selector is a route (`/api`), a domain (`example.com`) or an upstream port (`8000`)."))?;
+    let selector = crate::ops::selector(selector)?;
     // While the process is single-threaded, so the local offset can be read.
     let clock = Clock::local();
     let dir = files::dir(locations);

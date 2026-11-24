@@ -417,3 +417,24 @@ fn unwritable_log_directory_still_serves_and_warns() {
     assert_eq!(log.matches("cannot write the log in").count(), 1, "{log}");
     assert_eq!(home.run(&["status"]).code, 0);
 }
+
+#[test]
+fn configuration_changes_are_events() {
+    let home = Home::new();
+    let _daemon = home.start();
+    let port = free_port().to_string();
+    home.run(&["add", "/api", &port]).ok();
+    home.run(&["add", "/api", "9"]).ok();
+    home.run(&["rm", "/api"]).ok();
+    home.run(&["config", "log.max_age", "3d"]).ok();
+    for text in [
+        format!("rule added: /api → http://127.0.0.1:{port}"),
+        format!("rule updated: /api → http://127.0.0.1:9 (was http://127.0.0.1:{port})"),
+        "rule removed: /api (was → http://127.0.0.1:9)".to_owned(),
+        "setting changed: log.max_age 3d (was 7d)".to_owned(),
+    ] {
+        wait_for_record(&home, &text, |r| is_event_containing(r, &text));
+    }
+    let shown = home.run(&["logs", "--all"]).ok().stdout.clone();
+    assert!(shown.contains("rule added: /api"), "{shown}");
+}

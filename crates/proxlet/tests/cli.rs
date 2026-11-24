@@ -396,9 +396,10 @@ fn completion_offers_rules_keys_and_values() {
 }
 
 #[test]
-fn not_yet_available_commands_say_so() {
+fn mcp_is_hidden_from_help() {
     let home = Home::new();
-    let out = home.run(&["ai"]);
-    assert_eq!(out.code, 2);
-    assert!(out.stderr.contains("not available yet"), "{}", out.stderr);
+    let help = home.run(&["--help"]).ok().stdout.clone();
+    assert!(help.contains("  ai "), "{help}");
+    assert!(!help.contains("  mcp "), "{help}");
+    assert!(!home.complete(&[""]).contains(&"mcp".to_owned()));
 }

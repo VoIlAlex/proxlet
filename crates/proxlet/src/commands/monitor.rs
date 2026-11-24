@@ -29,7 +29,7 @@ pub fn run(locations: &Locations, once: bool) -> CmdResult {
     result.map_err(|e| Failure::new(format!("the terminal failed: {e}")))
 }
 
-fn failure(why: Fetch) -> Failure {
+pub(crate) fn failure(why: Fetch) -> Failure {
     match why {
         Fetch::NotRunning => {
             Failure::new("proxlet is not running").hint("Start it with: proxlet start")

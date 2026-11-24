@@ -29,6 +29,9 @@ All notable changes to this project are documented here. The format follows
 - Settings `log.access`, `log.max_size` and `log.max_age`. Durations accept `h` and `d`; sizes are written `KB`, `MB` or `GB`.
 - Live statistics per rule, kept in the running server's memory: requests per second, totals, 4xx/5xx, upstream errors, p50/p95/p99 latency, bytes sent per second, requests in flight and open WebSockets, plus a row for requests no rule answered. Counting never holds up a request and works with `log.access off`.
 - `proxlet monitor`: a live table refreshed every second, with sorting (`s`), scrolling and reconnection when the server restarts. `--once`, or piping it, prints one plain table.
+- `proxlet mcp`, an MCP server over stdio for AI coding tools. Tools: `status`, `list_rules`, `get_settings`, `read_logs`, `get_stats`, `add_rule`, `remove_rule` and `set_setting`, with the same validation, atomic writes and live application as the CLI. Directory targets must be absolute, and hosts nginx serves need `allow_front_conflict`.
+- `proxlet ai` connects proxlet to Claude Code (through `claude mcp add --scope user`) and Cursor (`~/.cursor/mcp.json`, edited in place with a backup), asking first unless `--yes`; `proxlet ai rm` disconnects.
+- Rule and setting changes are recorded as events in the logs (`rule added: …`, `setting changed: …`).
 
 ### Changed
 

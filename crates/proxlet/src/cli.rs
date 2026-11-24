@@ -95,8 +95,25 @@ pub enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// Connect proxlet to installed AI tools (registers its MCP server)
-    Ai,
+    /// Connect proxlet to installed AI tools (registers its MCP server): `proxlet ai [TOOL…]`, or `rm`
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "Tools: claude-code, cursor.\n\nExamples:\n  proxlet ai\n  proxlet ai cursor --yes\n  proxlet ai rm"
+    )]
+    Ai {
+        /// What to do instead of connecting.
+        #[command(subcommand)]
+        action: Option<AiAction>,
+        /// Tools to connect; omit for every installed one
+        #[arg(add = ArgValueCompleter::new(complete::ai_tools))]
+        tools: Vec<String>,
+        /// Connect without asking
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Serve MCP on stdin/stdout (what AI tools launch; see `proxlet ai`)
+    #[command(hide = true)]
+    Mcp,
     /// Show or change settings: `proxlet config [KEY [VALUE]]`
     Config {
         /// Setting name, e.g. `static.listing`; omit to list all settings
@@ -133,6 +150,17 @@ pub enum CertAction {
         /// The domains to renew; omit for every certificate
         #[arg(add = ArgValueCompleter::new(complete::cert_domains))]
         domains: Vec<String>,
+    },
+}
+
+/// `proxlet ai` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AiAction {
+    /// Disconnect proxlet from AI tools (all where it is connected when none given)
+    Rm {
+        /// The tools to disconnect
+        #[arg(add = ArgValueCompleter::new(complete::ai_tools))]
+        tools: Vec<String>,
     },
 }
 
@@ -200,6 +228,31 @@ mod tests {
         assert!(!once(&[]));
         assert!(once(&["--once"]));
         assert!(Cli::try_parse_from(["proxlet", "monitor", "/api"]).is_err());
+    }
+
+    #[test]
+    fn ai_parses_tools_and_rm() {
+        match Cli::try_parse_from(["proxlet", "ai", "cursor", "--yes"])
+            .unwrap()
+            .command
+        {
+            Command::Ai { action, tools, yes } => {
+                assert!(action.is_none() && yes);
+                assert_eq!(tools, ["cursor"]);
+            }
+            other => panic!("expected ai, got {other:?}"),
+        }
+        match Cli::try_parse_from(["proxlet", "ai", "rm", "claude-code"])
+            .unwrap()
+            .command
+        {
+            Command::Ai {
+                action: Some(AiAction::Rm { tools }),
+                ..
+            } => assert_eq!(tools, ["claude-code"]),
+            other => panic!("expected ai rm, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["proxlet", "mcp"]).is_ok());
     }
 
     #[test]

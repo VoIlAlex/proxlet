@@ -1,8 +1,8 @@
 //! `proxlet config [KEY [VALUE]]`.
 
-use proxlet_core::{Change, ConfigFile, Locations, SETTINGS, Settings, settings};
+use proxlet_core::{ConfigFile, Locations, SETTINGS, Settings, settings};
 
-use super::{note_not_running, submit};
+use super::note_not_running;
 use crate::control::WireOutcome;
 use crate::output::{self, BOLD, CmdResult, DIM};
 
@@ -55,9 +55,7 @@ fn list(locations: &Locations) -> CmdResult {
 }
 
 fn set(locations: &Locations, key: &str, raw: &str) -> CmdResult {
-    let def = settings::lookup(key)?;
-    let value = settings::Value::parse(def, raw)?;
-    let submitted = submit(locations, &Change::SetSetting(def, value.clone()))?;
+    let (def, value, submitted) = crate::ops::set_setting(locations, key, raw)?;
     let restart_needed = match &submitted.outcome {
         WireOutcome::SettingChanged {
             previous,
