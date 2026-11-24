@@ -4,6 +4,7 @@
 //! behind `main` so integration tests can drive it.
 
 pub mod attach;
+pub mod certs;
 pub mod cli;
 pub mod commands;
 pub mod complete;

@@ -23,16 +23,25 @@ pub fn run(locations: &Locations) -> CmdResult {
         format!("{} service (pid {})", s.run_by, s.pid)
     };
     anstream::println!("{OK}●{OK:#} proxlet is {BOLD}running{BOLD:#}");
-    let rows = [
-        ("mode", s.mode.clone()),
-        ("listen", listen_line(&s)),
+    let mut rows = vec![("mode", s.mode.clone()), ("listen", listen_line(&s))];
+    // A server from before HTTPS existed reports no HTTPS mode.
+    if !s.https_mode.is_empty() {
+        rows.push(("https", https_line(&s)));
+    }
+    rows.extend([
         ("run by", run_by),
         ("uptime", uptime(s.uptime_secs)),
         ("rules", s.rules.to_string()),
         ("version", s.version.clone()),
-    ];
+    ]);
     for (k, v) in rows {
         anstream::println!("  {DIM}{k:<8}{DIM:#}{v}");
+    }
+    for w in &s.cert_warnings {
+        output::warn(w);
+    }
+    if !s.cert_warnings.is_empty() {
+        output::note("See them with: proxlet cert ls");
     }
     if let Some(front) = s
         .mode
@@ -70,6 +79,19 @@ fn listen_line(s: &control::StatusInfo) -> String {
     format!("http://{} (port {port} not available yet)", s.internal)
 }
 
+/// The HTTPS port's state: where proxlet serves it, or why it does not.
+fn https_line(s: &control::StatusInfo) -> String {
+    if s.https_mode == "standalone" {
+        let n = s.certs;
+        return format!(
+            "https://{} ({n} certificate{})",
+            s.https_listen,
+            if n == 1 { "" } else { "s" }
+        );
+    }
+    s.https_mode.clone()
+}
+
 fn uptime(secs: u64) -> String {
     let (d, h, m, s) = (secs / 86_400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
     match (d, h, m) {
@@ -82,7 +104,7 @@ fn uptime(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{listen_line, uptime};
+    use super::{https_line, listen_line, uptime};
     use crate::control::StatusInfo;
 
     fn info(mode: &str) -> StatusInfo {
@@ -95,7 +117,26 @@ mod tests {
             run_by: "foreground".into(),
             uptime_secs: 0,
             rules: 0,
+            https_mode: "standalone".into(),
+            https_listen: "0.0.0.0:443".into(),
+            certs: 2,
+            cert_warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn https_line_follows_its_mode() {
+        assert_eq!(
+            https_line(&info("standalone")),
+            "https://0.0.0.0:443 (2 certificates)"
+        );
+        let mut s = info("standalone");
+        s.certs = 1;
+        assert_eq!(https_line(&s), "https://0.0.0.0:443 (1 certificate)");
+        s.https_mode = "attached (nginx)".into();
+        assert_eq!(https_line(&s), "attached (nginx)");
+        s.https_mode = "waiting for port 443 (held by caddy)".into();
+        assert_eq!(https_line(&s), "waiting for port 443 (held by caddy)");
     }
 
     #[test]

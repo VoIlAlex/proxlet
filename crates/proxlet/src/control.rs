@@ -32,6 +32,47 @@ pub enum Request {
     Release,
     /// Try to take the public port back now.
     Reclaim,
+    /// Answer a random token for a while, so the CLI can check that a domain
+    /// reaches this server.
+    Probe,
+    /// Get a certificate for a domain.
+    Issue {
+        /// The domain, already checked by the CLI.
+        domain: String,
+        /// Whether the user accepted the ACME server's terms.
+        #[serde(default)]
+        accept_terms: bool,
+    },
+    /// Renew certificates now, whether due or not (all when empty).
+    Renew {
+        /// The domains.
+        #[serde(default)]
+        domains: Vec<String>,
+    },
+    /// The certificate files changed (e.g. `cert rm`); load them again.
+    CertsChanged,
+}
+
+/// A certificate the daemon just obtained.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CertReply {
+    /// The domain.
+    pub domain: String,
+    /// End of validity, Unix seconds.
+    pub not_after: i64,
+}
+
+/// The result of renewing one certificate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenewReply {
+    /// The domain.
+    pub domain: String,
+    /// The new end of validity, when renewal worked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<i64>,
+    /// Why it failed, otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A configuration change on the wire. Targets are canonical strings: an
@@ -147,7 +188,7 @@ impl From<&Outcome> for WireOutcome {
 }
 
 /// What `status` reports.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusInfo {
     /// proxlet version.
     pub version: String,
@@ -166,6 +207,18 @@ pub struct StatusInfo {
     pub uptime_secs: u64,
     /// Number of rules being served.
     pub rules: usize,
+    /// The HTTPS port's mode, like `mode`.
+    #[serde(default)]
+    pub https_mode: String,
+    /// The public HTTPS address (`listen.address:listen.https_port`).
+    #[serde(default)]
+    pub https_listen: String,
+    /// Number of certificates.
+    #[serde(default)]
+    pub certs: usize,
+    /// Certificates expiring soon or failing to renew.
+    #[serde(default)]
+    pub cert_warnings: Vec<String>,
 }
 
 /// A reply from the daemon.
@@ -182,6 +235,19 @@ pub struct Reply {
     /// Outcome, for `apply`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<WireOutcome>,
+    /// For `probe`: the token and the body the server answers it with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<(String, String)>,
+    /// For `issue`: the new certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<CertReply>,
+    /// For `issue`: the ACME server's terms must be accepted first; the URL,
+    /// when it publishes one (empty otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<String>,
+    /// For `renew`: one entry per certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewed: Option<Vec<RenewReply>>,
 }
 
 impl Reply {

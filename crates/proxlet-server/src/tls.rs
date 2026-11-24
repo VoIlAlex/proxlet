@@ -12,6 +12,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
+pub use rustls::ServerConfig;
+
 /// Certificates by lowercase DNS name.
 pub type CertMap = HashMap<String, Arc<CertifiedKey>>;
 

@@ -526,6 +526,7 @@ mod tests {
             run_by: run_by.into(),
             uptime_secs: 1,
             rules: 2,
+            ..StatusInfo::default()
         }
     }
 

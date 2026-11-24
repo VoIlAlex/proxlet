@@ -26,11 +26,11 @@
 
 ## 5. Daemon: HTTPS port, issuance and renewal (proxlet)
 
-- [ ] 5.1 Run a second port owner for `listen.https_port` with a TLS binder; fan `Release`/`Reclaim` out to both owners and match bind failures for both ports in the watcher; verify with daemon tests for "HTTPS port taken" (HTTP unaffected) and handoff release/reclaim freeing and retaking both ports
-- [ ] 5.2 Load the store at startup into the resolver and `TlsView`; compute `https_served` from the HTTPS owner's mode and the ledger; rebuild on mode changes and on `tls.redirect` changes; verify with daemon tests that the redirect appears only while HTTPS is served and that `tls.redirect off` applies live
-- [ ] 5.3 Add the control requests `Probe`, `Issue { domain, accept_terms }`, `Renew { domains }` and `CertsChanged`, with the order mutex and a 120 s client timeout for `Issue`; verify with daemon tests that use the fake CA through a test hook: issue, then the resolver serves the new certificate over HTTPS
-- [ ] 5.4 Add the renewal task (startup delay, 12 h interval, planner from 3.3), keeping the old certificate on failure and recording the error; verify with daemon tests on short intervals for "Due for renewal" and "Renewal fails"
-- [ ] 5.5 Extend `StatusInfo` with the HTTPS mode, the address, the certificate count and expiring or failing certificates (`serde(default)` for older servers); verify with tests for the "HTTPS line" and "Certificate expiring" output
+- [x] 5.1 Run a second port owner for `listen.https_port` with a TLS binder; fan `Release`/`Reclaim` out to both owners and match bind failures for both ports in the watcher; verify with daemon tests for "HTTPS port taken" (HTTP unaffected) and handoff release/reclaim freeing and retaking both ports
+- [x] 5.2 Load the store at startup into the resolver and `TlsView`; compute `https_served` from the HTTPS owner's mode and the ledger; rebuild on mode changes and on `tls.redirect` changes; verify with daemon tests that the redirect appears only while HTTPS is served and that `tls.redirect off` applies live
+- [x] 5.3 Add the control requests `Probe`, `Issue { domain, accept_terms }`, `Renew { domains }` and `CertsChanged`, with the order mutex and a 120 s client timeout for `Issue`; verify with daemon tests that use the fake CA through a test hook: issue, then the resolver serves the new certificate over HTTPS
+- [x] 5.4 Add the renewal task (startup delay, 12 h interval, planner from 3.3), keeping the old certificate on failure and recording the error; verify with daemon tests on short intervals for "Due for renewal" and "Renewal fails"
+- [x] 5.5 Extend `StatusInfo` with the HTTPS mode, the address, the certificate count and expiring or failing certificates (`serde(default)` for older servers); verify with tests for the "HTTPS line" and "Certificate expiring" output
 
 ## 6. `proxlet cert` commands (proxlet)
 

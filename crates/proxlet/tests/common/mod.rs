@@ -19,6 +19,8 @@ pub struct Home {
     pub https_port: u16,
     /// A fake `nginx` script, if this home has one.
     pub nginx: Option<PathBuf>,
+    /// Extra environment for every command (overrides the defaults).
+    pub env: Vec<(String, String)>,
 }
 
 pub struct Run {
@@ -67,6 +69,7 @@ impl Home {
             internal_port: free_port(),
             https_port: free_port(),
             nginx: None,
+            env: Vec::new(),
         };
         home.run(&["config", "listen.address", "127.0.0.1"]).ok();
         home.run(&["config", "listen.http_port", &home.port.to_string()])
@@ -105,10 +108,42 @@ impl Home {
         c.args(args)
             .env("PROXLET_NGINX", nginx)
             .env("PROXLET_HOME", self.path())
+            // Never ask a real ACME server for a certificate.
+            .env("PROXLET_TEST_FAKE_ACME", (90 * 86_400).to_string())
             .env("NO_COLOR", "1")
             .env_remove("COMPLETE")
+            .env_remove("PROXLET_TEST_FAKE_ACME_FAIL")
+            .env_remove("PROXLET_TEST_RENEW_EVERY_MS")
             .current_dir(self.path());
+        for (k, v) in &self.env {
+            c.env(k, v);
+        }
         c
+    }
+
+    /// Sets an environment variable for every later command.
+    pub fn set_env(&mut self, key: &str, value: &str) {
+        self.env.retain(|(k, _)| k != key);
+        self.env.push((key.to_owned(), value.to_owned()));
+    }
+
+    /// The fake CA's root, once a daemon has started.
+    pub fn fake_root(&self) -> String {
+        std::fs::read_to_string(self.path().join("state/fake-acme-root.pem")).unwrap()
+    }
+
+    /// Talks to the daemon over its control socket.
+    pub fn control(&self, request: &proxlet::control::Request) -> proxlet::control::Reply {
+        let mut c =
+            proxlet::control::Client::connect_with_timeout(&self.socket(), Duration::from_secs(60))
+                .unwrap();
+        c.call(request).unwrap()
+    }
+
+    /// GET over HTTPS to this home's HTTPS port with SNI `name`, trusting the
+    /// fake CA. Returns (status, headers and body) or the TLS error.
+    pub fn https_get(&self, name: &str, path: &str) -> Result<(u16, String), String> {
+        https_get(self.https_port, &self.fake_root(), name, path)
     }
 
     pub fn run(&self, args: &[&str]) -> Run {
@@ -300,6 +335,66 @@ impl Home {
         }
         path
     }
+}
+
+/// GET `path` over HTTPS on `127.0.0.1:port` with SNI and `Host` set to
+/// `name`, trusting `root_pem`. Returns the status and the raw response.
+pub fn https_get(
+    port: u16,
+    root_pem: &str,
+    name: &str,
+    path: &str,
+) -> Result<(u16, String), String> {
+    use rustls::pki_types::pem::PemObject as _;
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from_pem_slice(root_pem.as_bytes()).unwrap())
+        .unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let server = rustls::pki_types::ServerName::try_from(name.to_owned()).unwrap();
+    let conn =
+        rustls::ClientConnection::new(Arc::new(config), server).map_err(|e| e.to_string())?;
+    let tcp = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+    write!(
+        tls,
+        "GET {path} HTTP/1.1\r\nHost: {name}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    match tls.read_to_end(&mut buf) {
+        Ok(_) => {}
+        // Servers may close without close_notify after `Connection: close`.
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !buf.is_empty() => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status = text
+        .get(9..12)
+        .and_then(|s| s.parse().ok())
+        .ok_or(text.clone())?;
+    Ok((status, text))
+}
+
+/// GET over plain HTTP; returns the status and the raw response, headers included.
+pub fn http_get_raw(port: u16, host: &str, path: &str) -> (u16, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut buf = String::new();
+    s.read_to_string(&mut buf).unwrap();
+    (buf[9..12].parse().unwrap(), buf)
 }
 
 pub fn http_get(port: u16, host: &str, path: &str) -> (u16, String) {

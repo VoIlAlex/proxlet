@@ -159,22 +159,34 @@ fn handoff_release_frees_the_port_and_reclaim_takes_it_back() {
     let home = Home::new();
     let _daemon = home.start();
     assert!(!port_is_free(home.port));
+    assert!(!port_is_free(home.https_port));
 
     let out = home.run(&["handoff", "release"]);
     out.ok();
     assert!(
-        out.stderr.contains("released the HTTP port"),
+        out.stderr.contains("released the HTTP and HTTPS ports"),
         "{}",
         out.stderr
     );
-    // The release returns only once the listener is closed.
-    assert!(port_is_free(home.port), "port still held after release");
+    // The release returns only once both listeners are closed.
+    assert!(
+        port_is_free(home.port),
+        "HTTP port still held after release"
+    );
+    assert!(
+        port_is_free(home.https_port),
+        "HTTPS port still held after release"
+    );
     // The internal listener keeps serving meanwhile.
     assert_eq!(home.get_internal("x", "/").0, 404);
 
     home.run(&["handoff", "reclaim"]).ok();
     home.wait_for_status("mode    standalone", Duration::from_secs(5));
     assert_eq!(home.get("x", "/").0, 404);
+    home.wait_for_status(
+        &format!("https   https://127.0.0.1:{}", home.https_port),
+        Duration::from_secs(5),
+    );
 }
 
 #[test]
