@@ -9,11 +9,13 @@ request nginx does not claim, without the user editing nginx config by hand.
 
 ### Requirement: Catch-all server block
 
-When nginx is installed and `attach.enabled` is `on`, `sudo proxlet start` SHALL
-install one nginx server block that forwards every request nginx does not claim to
-proxlet on `127.0.0.1:<attach.port>`. It SHALL pass the original `Host`, the
-client address in `X-Forwarded-For`, the scheme in `X-Forwarded-Proto`, and
-WebSocket upgrades, and SHALL NOT buffer responses.
+With nginx installed and `attach.enabled` `on`, `sudo proxlet start` SHALL
+install nginx server blocks on ports 80 and 443 that forward every request
+nginx does not claim to `127.0.0.1:<attach.port>` with the original `Host`,
+`X-Forwarded-For`, `X-Forwarded-Proto` and WebSocket upgrades, without
+buffering. The 443 block SHALL use proxlet's certificate for the requested
+name, read at handshake time. An nginx older than 1.15.9 or without TLS SHALL
+get only the port 80 block, with a warning.
 
 #### Scenario: Unclaimed host reaches proxlet
 
@@ -32,6 +34,16 @@ WebSocket upgrades, and SHALL NOT buffer responses.
 - **WHEN** a client opens a WebSocket on a route proxlet proxies, through nginx
 - **THEN** messages flow both ways between the client and the upstream
 
+#### Scenario: HTTPS block installed
+
+- **WHEN** the user runs `sudo proxlet start` with nginx 1.28 installed
+- **THEN** proxlet's nginx file has a port 443 server block marked `default_server` that forwards to `127.0.0.1:<attach.port>`, and `nginx -t` passes even before any certificate exists
+
+#### Scenario: nginx too old for HTTPS forwarding
+
+- **WHEN** the user runs `sudo proxlet start` with nginx 1.14 installed
+- **THEN** only the port 80 block is installed, the output warns that HTTPS is not forwarded to proxlet because nginx 1.15.9 or newer is needed, and the command exits zero
+
 ### Requirement: Safe nginx config changes
 
 Every change proxlet makes to nginx config SHALL be checked with `nginx -t`,
@@ -47,11 +59,12 @@ running its previous config, and exit non-zero showing nginx's error.
 
 ### Requirement: Default server takeover
 
-If another nginx server is already marked `default_server` for port 80, proxlet
-SHALL name its file and line and ask before taking over. On yes, it SHALL move the
-flag to its own block. On no, or with no terminal and no `--yes`, it SHALL leave
-nginx config unchanged, warn that unclaimed traffic stays with that server, and
-still start.
+If another nginx server is already marked `default_server` for port 80 or port
+443, proxlet SHALL name each such file and line and ask once before taking over.
+On yes, it SHALL move the flags to its own blocks. On no, or with no terminal
+and no `--yes`, it SHALL leave those flags unchanged, warn that unclaimed traffic
+on those ports stays with those servers, and still start. Ports with no default
+server SHALL get proxlet's block either way.
 
 #### Scenario: Take over with confirmation
 
@@ -69,18 +82,24 @@ still start.
 - **WHEN** the user runs `sudo proxlet start` and answers `n`
 - **THEN** nginx config is unchanged, the output warns that unclaimed traffic goes to the server at `/etc/nginx/sites-enabled/default:2`, and the command exits zero
 
+#### Scenario: Default on port 443 too
+
+- **GIVEN** `/etc/nginx/sites-enabled/main` line 5 has `listen 443 ssl default_server;` and line 2 has `listen 80 default_server;`
+- **WHEN** the user runs `sudo proxlet start`
+- **THEN** one question names both lines, and answering `y` moves both flags to proxlet's blocks
+
 ### Requirement: Handoff when nginx starts as a service
 
 On a systemd host, `sudo proxlet start` SHALL hook `nginx.service` so that, before
-nginx starts, proxlet releases port 80 and keeps serving on its internal port. The
-hook SHALL never stop nginx from starting, even when proxlet is not running or
-not installed.
+nginx starts, proxlet releases ports 80 and 443 and keeps serving on its
+internal port. The hook SHALL never stop nginx from starting, even when proxlet
+is not running or not installed.
 
 #### Scenario: nginx starts while proxlet holds port 80
 
-- **GIVEN** proxlet is running standalone on port 80
+- **GIVEN** proxlet is running standalone on ports 80 and 443
 - **WHEN** the user runs `sudo systemctl start nginx`
-- **THEN** nginx starts successfully, `proxlet status` shows `mode    attached (nginx)`, and proxlet's rules are still served on port 80 through nginx
+- **THEN** nginx starts successfully, `proxlet status` shows `mode    attached (nginx)` and `https   attached (nginx)`, and proxlet's rules are still served on ports 80 and 443 through nginx
 
 #### Scenario: proxlet not running
 
@@ -90,39 +109,40 @@ not installed.
 
 ### Requirement: Handoff when nginx is started directly
 
-While proxlet holds port 80, it SHALL watch for nginx failing to bind that port
-and release it within nginx's retry window, so that nginx started by hand or by
-another launcher succeeds. If nginx has not taken the port 10 seconds after a
-release, proxlet SHALL take it back.
+While proxlet holds port 80 or port 443, it SHALL watch for nginx failing to bind
+either port and release both within nginx's retry window, so that nginx started
+by hand or by another launcher succeeds. If nginx has not taken a released port
+10 seconds after the release, proxlet SHALL take it back.
 
 #### Scenario: nginx started by hand
 
-- **GIVEN** proxlet is running standalone on port 80
+- **GIVEN** proxlet is running standalone on ports 80 and 443
 - **WHEN** the user runs `sudo nginx`
-- **THEN** nginx starts successfully and proxlet's rules are served through nginx
+- **THEN** nginx starts successfully and proxlet's rules are served through nginx on both ports
 
 #### Scenario: nginx fails for another reason
 
-- **GIVEN** proxlet released port 80 because nginx tried to bind it
-- **WHEN** nginx exits without binding the port
-- **THEN** proxlet listens on port 80 again within 15 seconds of the release
+- **GIVEN** proxlet released its ports because nginx tried to bind them
+- **WHEN** nginx exits without binding them
+- **THEN** proxlet listens on ports 80 and 443 again within 15 seconds of the release
 
 ### Requirement: Reclaim when nginx stops
 
-When proxlet is attached and port 80 becomes free, proxlet SHALL listen on it
-again within 5 seconds and serve its rules directly.
+When proxlet is attached and port 80 or port 443 becomes free, proxlet SHALL
+listen on it again within 5 seconds and serve its rules directly, over TLS on
+the HTTPS port.
 
 #### Scenario: nginx stopped
 
 - **GIVEN** proxlet is attached behind nginx
 - **WHEN** the user runs `sudo systemctl stop nginx`
-- **THEN** within 5 seconds proxlet serves its rules on port 80 and `proxlet status` shows `mode    standalone`
+- **THEN** within 5 seconds proxlet serves its rules on ports 80 and 443, and `proxlet status` shows `mode    standalone` and an `https` line with proxlet's address
 
 ### Requirement: Detach on stop
 
-`sudo proxlet stop` SHALL remove proxlet's server block and its `nginx.service`
-hook, restore any `default_server` flag it moved, and reload nginx, using the same
-check-and-restore safety as other nginx config changes.
+`sudo proxlet stop` SHALL remove proxlet's server blocks and its `nginx.service`
+hook, restore any `default_server` flag it moved on either port, and reload
+nginx, using the same check-and-restore safety as other nginx config changes.
 
 #### Scenario: Stop while attached
 

@@ -20,9 +20,10 @@ requests finish within a bounded grace period, and exit zero.
 
 ### Requirement: Port check on start
 
-The server SHALL listen on its HTTP port when the port is free. When nginx holds
-it and attach is enabled, the server SHALL attach behind nginx. When any other
-process holds it, the server SHALL keep running, log an error naming the port and
+The server SHALL handle `listen.http_port` and `listen.https_port`
+independently, so that neither affects the other. For each port it SHALL
+listen when the port is free, attach behind nginx when nginx holds it and
+attach is enabled, and otherwise keep running, log an error naming the port and
 the holder, and retry until the port is free. A second proxlet SHALL still exit
 non-zero.
 
@@ -46,6 +47,11 @@ non-zero.
 - **GIVEN** the server is waiting for its HTTP port
 - **WHEN** the holder stops listening
 - **THEN** the server listens on the port within 5 seconds and serves its rules
+
+#### Scenario: HTTPS port taken
+
+- **WHEN** another process listens on port 443 and port 80 is free, and the server is started
+- **THEN** the server serves plain HTTP on port 80, logs that port 443 is in use by `<name>`, and `proxlet status` shows `https   waiting for port 443 (held by <name>)`
 
 #### Scenario: A second proxlet
 
@@ -73,6 +79,11 @@ already running SHALL succeed and say so.
 
 - **WHEN** a process other than nginx holds port 80 and the user runs `sudo proxlet start`
 - **THEN** the service is running, the command warns `waiting for port 80, held by <name> (pid <pid>)`, and exits zero
+
+#### Scenario: Start on a taken HTTPS port
+
+- **WHEN** a process other than nginx holds port 443 and the user runs `sudo proxlet start`
+- **THEN** the service is running, the command warns `waiting for port 443, held by <name> (pid <pid>)`, and exits zero
 
 #### Scenario: Start fails
 
@@ -129,10 +140,12 @@ service is not running SHALL succeed and say so.
 
 ### Requirement: Status
 
-`proxlet status` SHALL report whether the server is running. When running it
-SHALL show the mode (`standalone`, `attached (nginx)` or `waiting for port <n>
-(held by <name>)`), the listening address, how it is run, the uptime and the
-number of rules. It SHALL exit zero when running and non-zero when not.
+`proxlet status` SHALL say whether the server is running and exit zero when it
+is, non-zero when not. When running it SHALL show the HTTP port's mode
+(`standalone`, `attached (nginx)` or `waiting for port <n> (held by <name>)`)
+and address, an `https` line for the HTTPS port in the same terms, how it is
+run, the uptime and the rule count, and SHALL warn about each certificate that
+has 14 days or less left or fails to renew.
 
 #### Scenario: Running standalone
 
@@ -143,6 +156,18 @@ number of rules. It SHALL exit zero when running and non-zero when not.
 
 - **WHEN** the server is attached behind nginx and the user runs `proxlet status`
 - **THEN** the output shows `mode    attached (nginx)` and `listen  http://127.0.0.1:<attach.port> (behind nginx on port 80)`, and the command exits zero
+
+#### Scenario: HTTPS line
+
+- **GIVEN** proxlet holds port 443 and has two certificates
+- **WHEN** the user runs `proxlet status`
+- **THEN** the output includes `https   https://0.0.0.0:443 (2 certificates)`
+
+#### Scenario: Certificate expiring
+
+- **GIVEN** the certificate for `example.com` has 10 days left and its renewal is failing
+- **WHEN** the user runs `proxlet status`
+- **THEN** the output warns that `example.com` expires in 10 days, gives the renewal error, and the command still exits zero
 
 #### Scenario: Not running
 
