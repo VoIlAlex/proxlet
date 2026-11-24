@@ -32,6 +32,9 @@ use crate::{CertError, Store, Stored};
 /// file (for Pebble and other test servers).
 pub const ROOTS_ENV: &str = "PROXLET_ACME_ROOTS";
 
+/// The User-Agent proxlet sends to ACME servers.
+pub const USER_AGENT: &str = concat!("proxlet/", env!("CARGO_PKG_VERSION"));
+
 /// How long to wait for the CA to validate a challenge or issue the chain.
 pub const POLL_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -226,7 +229,9 @@ impl Http {
 
     /// Fetches `url` and parses it as JSON.
     async fn get_json(&self, url: &str) -> Result<serde_json::Value, AcmeError> {
+        // ACME servers may refuse requests without a User-Agent (RFC 8555, 6.1).
         let req = http::Request::get(url)
+            .header(http::header::USER_AGENT, USER_AGENT)
             .body(BodyWrapper::default())
             .map_err(|e| AcmeError::Network(e.to_string()))?;
         let rsp = tokio::time::timeout(Duration::from_secs(30), self.0.request(req))
