@@ -308,6 +308,29 @@ fn ports_must_differ_and_nothing_changes() {
 }
 
 #[test]
+fn days_and_sizes() {
+    let home = Home::new();
+    home.run(&["config", "log.max_age", "30d"]).ok();
+    home.run(&["config", "log.max_size", "1GB"]).ok();
+    assert_eq!(home.run(&["config", "log.max_age"]).ok().stdout, "30d\n");
+    assert_eq!(home.run(&["config", "log.max_size"]).ok().stdout, "1GB\n");
+    let listed = home.run(&["config"]).ok().stdout.clone();
+    assert!(listed.contains("log.max_age\t30d\n"), "{listed}");
+    assert!(listed.contains("log.max_size\t1GB\n"), "{listed}");
+}
+
+#[test]
+fn log_size_too_small() {
+    let home = Home::new();
+    let before = std::fs::read(home.config_file()).ok();
+    let out = home.run(&["config", "log.max_size", "1MB"]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(out.stderr.contains("at least 10MB"), "{}", out.stderr);
+    assert_eq!(std::fs::read(home.config_file()).ok(), before);
+    assert_eq!(home.run(&["config", "log.max_size"]).ok().stdout, "100MB\n");
+}
+
+#[test]
 fn acme_server_values() {
     let home = Home::new();
     let out = home.run(&["config", "cert.server", "http://acme.local/dir"]);

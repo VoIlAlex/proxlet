@@ -3,6 +3,7 @@
 pub mod cert;
 pub mod config;
 pub mod handoff;
+pub mod logs;
 pub mod rules;
 pub mod service;
 pub mod status;

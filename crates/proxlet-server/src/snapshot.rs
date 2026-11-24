@@ -45,7 +45,6 @@ pub(crate) struct ProxyTarget {
 #[derive(Debug)]
 pub(crate) struct FilesTarget {
     /// The rule's route as the user wrote it, for error messages.
-    #[allow(dead_code, reason = "used by request logging in the logs change")]
     pub route: String,
     /// Canonical root directory (or the configured path if it cannot be resolved).
     pub root: PathBuf,

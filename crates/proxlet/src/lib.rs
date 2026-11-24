@@ -10,6 +10,7 @@ pub mod commands;
 pub mod complete;
 pub mod control;
 pub mod daemon;
+pub mod logs;
 pub mod output;
 pub mod pipeline;
 pub mod ports;
@@ -37,27 +38,36 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn init_logging() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("PROXLET_LOG")
+/// Messages go to stderr, filtered by `PROXLET_LOG`; with `record`, proxlet's
+/// own info-and-above messages also become event records.
+fn init_logging(record: Option<logs::layer::RecordLayer>) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer, filter};
+    let env = EnvFilter::try_from_env("PROXLET_LOG")
         .unwrap_or_else(|_| EnvFilter::new("proxlet=info,proxlet_server=info"));
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let fmt = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr);
     // The journal timestamps lines itself.
-    if std::env::var_os(daemon::SERVICE_ENV).is_some() {
-        builder.without_time().init();
+    let fmt = if std::env::var_os(daemon::SERVICE_ENV).is_some() {
+        fmt.without_time().boxed()
     } else {
-        builder.init();
-    }
+        fmt.boxed()
+    };
+    let record = record.map(|r| r.with_filter(filter::filter_fn(logs::layer::RecordLayer::wants)));
+    tracing_subscriber::registry()
+        .with(fmt.with_filter(env))
+        .with(record)
+        .init();
 }
 
 fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
     match command {
         Command::Run => {
-            init_logging();
-            daemon::run(locations)
+            let (sender, queue) = logs::writer::queue();
+            init_logging(Some(logs::layer::RecordLayer::new(sender.clone())));
+            daemon::run(locations, sender, queue)
         }
         Command::Start { yes } => commands::service::start(locations, *yes),
         Command::Stop => commands::service::stop(locations),
@@ -71,7 +81,11 @@ fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
         Command::Handoff { action, socket } => {
             commands::handoff::run(locations, *action, socket.as_deref())
         }
-        Command::Logs { .. } => not_yet("logs", "structured logs"),
+        Command::Logs {
+            selector,
+            all,
+            json,
+        } => commands::logs::run(locations, selector.as_deref(), *all, *json),
         Command::Cert {
             action,
             domains,

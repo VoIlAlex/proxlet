@@ -44,8 +44,10 @@ pub enum Kind {
     Port,
     /// An IPv4 or IPv6 address.
     Ip,
-    /// A duration such as `500ms`, `5s` or `2m`.
+    /// A duration such as `500ms`, `5s`, `2m`, `1h` or `7d`.
     Duration,
+    /// A size such as `512KB`, `100MB` or `1GB` (powers of 1024).
+    Size,
     /// An ACME server: `production`, `staging` or an `https://` directory URL.
     AcmeServer,
 }
@@ -56,7 +58,10 @@ impl Kind {
             Self::Bool => "the value must be `on` or `off`",
             Self::Port => "the value must be a port from 1 to 65535",
             Self::Ip => "the value must be an IP address such as `0.0.0.0` or `127.0.0.1`",
-            Self::Duration => "the value must be a number followed by `ms`, `s` or `m`, e.g. `30s`",
+            Self::Duration => {
+                "the value must be a number followed by `ms`, `s`, `m`, `h` or `d`, e.g. `30s`"
+            }
+            Self::Size => "the value must be a number followed by `KB`, `MB` or `GB`, e.g. `100MB`",
             Self::AcmeServer => {
                 "the value must be `production`, `staging` or an `https://` ACME directory URL"
             }
@@ -155,6 +160,24 @@ pub const SETTINGS: &[SettingDef] = &[
         live: true,
         help: "ACME server certificates come from: production, staging or a URL",
     },
+    SettingDef {
+        key: "log.access",
+        kind: Kind::Bool,
+        live: true,
+        help: "Record every request in the log files",
+    },
+    SettingDef {
+        key: "log.max_size",
+        kind: Kind::Size,
+        live: true,
+        help: "Delete the oldest log files beyond this total size (at least 10MB)",
+    },
+    SettingDef {
+        key: "log.max_age",
+        kind: Kind::Duration,
+        live: true,
+        help: "Delete log files older than this",
+    },
 ];
 
 /// Looks up a setting definition, suggesting the closest key on a miss.
@@ -251,6 +274,8 @@ pub enum Value {
     Ip(IpAddr),
     /// A duration.
     Duration(Duration),
+    /// A size in bytes.
+    Size(u64),
     /// An ACME server.
     AcmeServer(AcmeServer),
 }
@@ -276,6 +301,7 @@ impl Value {
             },
             Kind::Ip => s.parse().map(Self::Ip).map_err(|_| invalid()),
             Kind::Duration => parse_duration(s).map(Self::Duration).ok_or_else(invalid),
+            Kind::Size => parse_size(s).map(Self::Size).ok_or_else(invalid),
             Kind::AcmeServer => AcmeServer::parse(s)
                 .map(Self::AcmeServer)
                 .ok_or_else(invalid),
@@ -291,34 +317,69 @@ impl fmt::Display for Value {
             Self::Port(p) => write!(f, "{p}"),
             Self::Ip(ip) => write!(f, "{ip}"),
             Self::Duration(d) => f.write_str(&format_duration(*d)),
+            Self::Size(n) => f.write_str(&format_size(*n)),
             Self::AcmeServer(s) => s.fmt(f),
         }
     }
 }
 
-fn parse_duration(s: &str) -> Option<Duration> {
+/// Splits `123unit` into the number and the unit.
+fn number_and_unit(s: &str) -> Option<(u64, &str)> {
     let split = s.find(|c: char| !c.is_ascii_digit())?;
     let (num, unit) = s.split_at(split);
-    let n: u64 = num.parse().ok()?;
-    let d = match unit {
-        "ms" => Duration::from_millis(n),
-        "s" => Duration::from_secs(n),
-        "m" => Duration::from_secs(n.checked_mul(60)?),
-        _ => return None,
-    };
+    Some((num.parse().ok()?, unit))
+}
+
+const DURATION_UNITS: [(&str, u64); 5] = [
+    ("d", 86_400_000),
+    ("h", 3_600_000),
+    ("m", 60_000),
+    ("s", 1000),
+    ("ms", 1),
+];
+
+fn parse_duration(s: &str) -> Option<Duration> {
+    let (n, unit) = number_and_unit(s)?;
+    let (_, ms) = DURATION_UNITS.iter().find(|(u, _)| *u == unit)?;
+    let d = Duration::from_millis(n.checked_mul(*ms)?);
     (!d.is_zero()).then_some(d)
 }
 
 fn format_duration(d: Duration) -> String {
     let ms = d.as_millis();
-    if ms.is_multiple_of(60_000) {
-        format!("{}m", ms / 60_000)
-    } else if ms.is_multiple_of(1000) {
-        format!("{}s", ms / 1000)
-    } else {
-        format!("{ms}ms")
-    }
+    let (unit, per) = DURATION_UNITS
+        .iter()
+        .find(|(_, per)| ms.is_multiple_of(u128::from(*per)))
+        .expect("every duration is a whole number of milliseconds");
+    format!("{}{unit}", ms / u128::from(*per))
 }
+
+/// One megabyte (1024 × 1024 bytes).
+pub const MB: u64 = 1024 * 1024;
+
+const SIZE_UNITS: [(&str, u64); 3] = [("GB", 1024 * MB), ("MB", MB), ("KB", 1024)];
+
+fn parse_size(s: &str) -> Option<u64> {
+    let (n, unit) = number_and_unit(s)?;
+    let (_, per) = SIZE_UNITS
+        .iter()
+        .find(|(u, _)| u.eq_ignore_ascii_case(unit))?;
+    let bytes = n.checked_mul(*per)?;
+    (bytes > 0).then_some(bytes)
+}
+
+fn format_size(bytes: u64) -> String {
+    SIZE_UNITS
+        .iter()
+        .find(|(_, per)| bytes.is_multiple_of(*per))
+        .map_or_else(
+            || format!("{bytes}B"),
+            |(unit, per)| format!("{}{unit}", bytes / per),
+        )
+}
+
+/// The smallest `log.max_size`: one log file.
+pub const MIN_LOG_SIZE: u64 = 10 * MB;
 
 /// The current value of every setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +410,12 @@ pub struct Settings {
     pub tls_redirect: bool,
     /// `cert.server`
     pub cert_server: AcmeServer,
+    /// `log.access`
+    pub log_access: bool,
+    /// `log.max_size`, in bytes
+    pub log_max_size: u64,
+    /// `log.max_age`
+    pub log_max_age: Duration,
 }
 
 impl Default for Settings {
@@ -365,6 +432,9 @@ impl Default for Settings {
             attach_port: 47080,
             tls_redirect: true,
             cert_server: AcmeServer::Production,
+            log_access: true,
+            log_max_size: 100 * MB,
+            log_max_age: Duration::from_secs(7 * 86_400),
         }
     }
 }
@@ -385,6 +455,9 @@ impl Settings {
             "attach.port" => Value::Port(self.attach_port),
             "tls.redirect" => Value::Bool(self.tls_redirect),
             "cert.server" => Value::AcmeServer(self.cert_server.clone()),
+            "log.access" => Value::Bool(self.log_access),
+            "log.max_size" => Value::Size(self.log_max_size),
+            "log.max_age" => Value::Duration(self.log_max_age),
             other => unreachable!("setting `{other}` has no field"),
         }
     }
@@ -407,6 +480,9 @@ impl Settings {
             ("attach.port", Value::Port(v)) => self.attach_port = v,
             ("tls.redirect", Value::Bool(v)) => self.tls_redirect = v,
             ("cert.server", Value::AcmeServer(v)) => self.cert_server = v,
+            ("log.access", Value::Bool(v)) => self.log_access = v,
+            ("log.max_size", Value::Size(v)) => self.log_max_size = v,
+            ("log.max_age", Value::Duration(v)) => self.log_max_age = v,
             (key, value) => panic!("value {value:?} does not fit setting `{key}`"),
         }
     }
@@ -416,8 +492,18 @@ impl Settings {
     ///
     /// # Errors
     ///
-    /// When two settings that must differ are the same.
+    /// When two settings that must differ are the same, or `log.max_size`
+    /// is below [`MIN_LOG_SIZE`].
     pub fn check(&self, changed: Option<&'static str>) -> Result<(), SettingError> {
+        if self.log_max_size < MIN_LOG_SIZE {
+            return Err(SettingError::Conflict {
+                key: "log.max_size",
+                message: format!(
+                    "`log.max_size` must be at least {}, the size of one log file",
+                    format_size(MIN_LOG_SIZE)
+                ),
+            });
+        }
         let ports = [
             ("listen.http_port", "HTTP port", self.http_port),
             ("listen.https_port", "HTTPS port", self.https_port),
@@ -474,7 +560,10 @@ mod tests {
                 "on",
                 "47080",
                 "on",
-                "production"
+                "production",
+                "on",
+                "100MB",
+                "7d"
             ]
         );
         assert!(SETTINGS.iter().all(|d| !s.is_changed(d)));
@@ -526,9 +615,55 @@ mod tests {
         );
         assert_eq!(Value::parse(d, "1500ms").unwrap().to_string(), "1500ms");
         assert_eq!(Value::parse(d, "30s").unwrap().to_string(), "30s");
-        for bad in ["", "5", "s", "5h", "0s", "-1s", "1.5s"] {
+        assert_eq!(Value::parse(d, "7d").unwrap().to_string(), "7d");
+        assert_eq!(Value::parse(d, "168h").unwrap().to_string(), "7d");
+        assert_eq!(Value::parse(d, "90m").unwrap().to_string(), "90m");
+        assert_eq!(Value::parse(d, "120m").unwrap().to_string(), "2h");
+        assert_eq!(Value::parse(d, "60000ms").unwrap().to_string(), "1m");
+        assert_eq!(
+            Value::parse(d, "2h").unwrap(),
+            Value::Duration(Duration::from_secs(7200))
+        );
+        for bad in ["", "5", "s", "5w", "0s", "0d", "-1s", "1.5s", "5 h", "5H"] {
             assert!(Value::parse(d, bad).is_err(), "{bad:?}");
         }
+        let err = Value::parse(d, "5w").unwrap_err().to_string();
+        assert!(err.contains("`h` or `d`"), "{err}");
+    }
+
+    #[test]
+    fn size_values() {
+        let d = def("log.max_size");
+        assert_eq!(Value::parse(d, "100MB").unwrap(), Value::Size(100 * MB));
+        assert_eq!(Value::parse(d, "1GB").unwrap().to_string(), "1GB");
+        assert_eq!(Value::parse(d, "1024MB").unwrap().to_string(), "1GB");
+        assert_eq!(Value::parse(d, "1536MB").unwrap().to_string(), "1536MB");
+        assert_eq!(Value::parse(d, "512kb").unwrap().to_string(), "512KB");
+        assert_eq!(Value::parse(d, "2048KB").unwrap().to_string(), "2MB");
+        for bad in ["", "100", "MB", "0MB", "1.5GB", "10TB", "-1MB", "10 MB"] {
+            assert!(Value::parse(d, bad).is_err(), "{bad:?}");
+        }
+        let err = Value::parse(d, "10TB").unwrap_err().to_string();
+        assert!(err.contains("`KB`, `MB` or `GB`"), "{err}");
+        assert_eq!(format_size(1500), "1500B");
+    }
+
+    #[test]
+    fn log_size_has_a_minimum() {
+        let ok = Settings {
+            log_max_size: MIN_LOG_SIZE,
+            ..Settings::default()
+        };
+        assert!(ok.check(None).is_ok());
+        let small = Settings {
+            log_max_size: MB,
+            ..Settings::default()
+        };
+        let err = small.check(Some("log.max_size")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "`log.max_size` must be at least 10MB, the size of one log file"
+        );
     }
 
     #[test]

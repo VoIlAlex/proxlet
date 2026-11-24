@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use proxlet_core::{ConfigFile, Locations, port};
@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 use crate::attach;
 use crate::certs::{self, Certs};
 use crate::control::{self, CertReply, RenewReply, Reply, Request, StatusInfo, WireOutcome};
+use crate::logs::{self, writer::LogSender};
 use crate::output::{CmdResult, Failure};
 use crate::pipeline;
 use crate::ports::{self, Mode};
@@ -44,14 +45,14 @@ struct State {
 }
 
 /// Runs the server in the foreground until interrupted.
-pub fn run(locations: &Locations) -> CmdResult {
+pub fn run(locations: &Locations, log: LogSender, queue: logs::writer::Queue) -> CmdResult {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_async(locations))
+    runtime.block_on(run_async(locations, log, queue))
 }
 
-async fn run_async(locations: &Locations) -> CmdResult {
+async fn run_async(locations: &Locations, log: LogSender, queue: logs::writer::Queue) -> CmdResult {
     // Before anything can observe the server (the control socket), so a stop
     // signal is never met by the default action, which kills the process.
     let term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -64,6 +65,8 @@ async fn run_async(locations: &Locations) -> CmdResult {
     let (_, config) = file.read()?;
     let snapshot = Snapshot::build(&config).map_err(|e| Failure::new(e.to_string()))?;
     let settings = &config.settings;
+    let engine_cell = Arc::new(OnceLock::new());
+    let writer = start_log_writer(locations, queue, settings, engine_cell.clone())?;
     let listen = SocketAddr::new(settings.listen_address, settings.http_port);
     let https_listen = SocketAddr::new(settings.listen_address, settings.https_port);
     let internal = SocketAddr::from(([127, 0, 0, 1], settings.attach_port));
@@ -79,6 +82,8 @@ async fn run_async(locations: &Locations) -> CmdResult {
 
     let rules = snapshot.rule_count();
     let engine = Engine::new(snapshot);
+    let _ = engine_cell.set(engine.clone());
+    engine.set_access_log(Arc::new(log));
     let conns = Connections::new();
     let (stop, stop_rx) = watch::channel(false);
     let wiring = wire_ports();
@@ -151,7 +156,33 @@ async fn run_async(locations: &Locations) -> CmdResult {
     }
     let _ = std::fs::remove_file(&socket);
     tracing::info!("stopped");
+    let _ = tokio::task::spawn_blocking(move || writer.close()).await;
     Ok(())
+}
+
+fn log_limits(settings: &proxlet_core::Settings) -> logs::files::Limits {
+    logs::files::Limits {
+        max_size: settings.log_max_size,
+        max_age: settings.log_max_age,
+    }
+}
+
+/// Starts the log writer. Its limits come from the engine's snapshot once
+/// the engine exists, so changes apply live.
+fn start_log_writer(
+    locations: &Locations,
+    queue: logs::writer::Queue,
+    settings: &proxlet_core::Settings,
+    engine: Arc<OnceLock<Arc<Engine>>>,
+) -> Result<logs::writer::WriterHandle, Failure> {
+    let initial = log_limits(settings);
+    let limits: logs::writer::LimitsFn = Arc::new(move || {
+        engine
+            .get()
+            .map_or(initial, |e| log_limits(e.snapshot().settings()))
+    });
+    logs::writer::start(logs::files::dir(locations), queue, limits)
+        .map_err(|e| Failure::new(format!("cannot start the log writer: {e}")))
 }
 
 /// Stops every listener, then gives open connections [`GRACE`] to finish.

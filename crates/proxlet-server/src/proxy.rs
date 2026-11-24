@@ -12,6 +12,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 
+use crate::access::UpstreamError;
 use crate::response;
 use crate::snapshot::ProxyTarget;
 use crate::{Body, Origin};
@@ -130,6 +131,13 @@ fn reason(err: &hyper_util::client::legacy::Error) -> String {
     err.to_string()
 }
 
+/// An error response that carries `why` for the access record.
+fn failed(status: StatusCode, message: String, why: String) -> Response<Body> {
+    let mut resp = response::text(status, message);
+    resp.extensions_mut().insert(UpstreamError(why));
+    resp
+}
+
 /// Forwards `req` to the upstream and returns its response, or a 502/504.
 pub(crate) async fn forward(
     client: UpstreamClient,
@@ -154,7 +162,11 @@ pub(crate) async fn forward(
         .path_and_query(path_and_query)
         .build();
     let Ok(uri) = uri else {
-        return response::text(StatusCode::BAD_REQUEST, "proxlet: invalid request target");
+        return failed(
+            StatusCode::BAD_REQUEST,
+            "proxlet: invalid request target".into(),
+            "invalid request target".into(),
+        );
     };
     parts.uri = uri;
     parts.version = Version::HTTP_11;
@@ -171,23 +183,26 @@ pub(crate) async fn forward(
     let result = tokio::time::timeout(timeout, client.request(upstream_req)).await;
     let mut resp = match result {
         Err(_) => {
-            return response::text(
+            let why = format!("no response within {}s", timeout.as_secs_f32());
+            return failed(
                 StatusCode::GATEWAY_TIMEOUT,
                 format!(
                     "proxlet: {} got no response from {upstream} within {}s",
                     target.route,
                     timeout.as_secs_f32()
                 ),
+                why,
             );
         }
         Ok(Err(e)) => {
-            return response::text(
+            let why = reason(&e);
+            return failed(
                 StatusCode::BAD_GATEWAY,
                 format!(
-                    "proxlet: {} could not reach {upstream} ({})",
-                    target.route,
-                    reason(&e)
+                    "proxlet: {} could not reach {upstream} ({why})",
+                    target.route
                 ),
+                why,
             );
         }
         Ok(Ok(resp)) => resp,

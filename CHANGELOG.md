@@ -24,6 +24,9 @@ All notable changes to this project are documented here. The format follows
 - HTTPS: proxlet serves port 443 (`listen.https_port`) with SNI certificate selection, HTTP/2 and WebSockets; certificates change without a restart. Port 443 follows the same ownership rules as port 80.
 - HTTPS behind nginx: a second catch-all on port 443 that terminates TLS with proxlet's certificate for the requested name (nginx 1.15.9 or newer). The default-server takeover covers both ports.
 - Settings `listen.https_port`, `tls.redirect` and `cert.server` (`production`, `staging` or an ACME directory URL).
+- Request logs: every request is recorded (client, method, host, path without the query, status, bytes, duration, rule, upstream or directory, and the proxy error), along with the server's own messages, as JSON lines in `<state>/logs/`. Files rotate at 10 MB and are kept within `log.max_size` (`100MB`) and `log.max_age` (`7d`); recording never holds up a request.
+- `proxlet logs [<selector>]` shows the last 20 records and follows new ones; `--all` prints every stored record, `--json` the stored lines. A selector is a route, a domain or an upstream port, and tab-completes. It works while proxlet is stopped.
+- Settings `log.access`, `log.max_size` and `log.max_age`. Durations accept `h` and `d`; sizes are written `KB`, `MB` or `GB`.
 
 ### Changed
 

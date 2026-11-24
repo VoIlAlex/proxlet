@@ -76,6 +76,38 @@ jobs:
           if curl -fsS http://127.0.0.1/site/; then echo "still serving after stop"; exit 1; fi
           "$P" ls | grep -q "^/site"
           sudo "$P" stop | grep -q "not running"
+      - name: logs from the service
+        run: |
+          set -euxo pipefail
+          P="$PWD/target/debug/proxlet"
+          sudo "$P" start
+          curl -fsS http://127.0.0.1/site/ >/dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/nope)" = 404
+
+          # Following: the history, then a new request, without its query.
+          sleep 1
+          before=$("$P" logs /site --all --json | wc -l)
+          timeout 4 "$P" logs /site --json > /tmp/follow.txt &
+          F=$!
+          sleep 1.5
+          curl -fsS "http://127.0.0.1/site/?secret=1" >/dev/null
+          wait $F || true
+          cat /tmp/follow.txt
+          test "$(wc -l < /tmp/follow.txt)" -eq $((before + 1))
+          tail -n 1 /tmp/follow.txt | grep -q '"path":"/site/"'
+          if grep -q secret /tmp/follow.txt; then echo "query recorded"; exit 1; fi
+
+          "$P" logs --all | tee /tmp/logs.txt
+          grep -q " 200  GET .*127.0.0.1/site/" /tmp/logs.txt
+          grep -q " 404  GET .*127.0.0.1/nope" /tmp/logs.txt
+          grep -q "INFO .*listening on http://" /tmp/logs.txt
+          "$P" logs /site --all --json | python3 -m json.tool --json-lines
+          test "$(stat -c %a "$HOME/.local/state/proxlet/logs")" = 700
+          test "$(stat -c %U "$HOME/.local/state/proxlet/logs/proxlet.log")" = "$USER"
+
+          # Still readable once the service has stopped.
+          sudo "$P" stop
+          "$P" logs --all | grep -q "stopped"
       - name: a taken port means waiting, then taking it
         run: |
           set -euxo pipefail
