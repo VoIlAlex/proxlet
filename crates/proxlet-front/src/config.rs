@@ -99,6 +99,10 @@ pub struct FrontConfig {
     pub http_includes: Vec<IncludeDir>,
     /// The main-context `error_log` path as written, if any.
     pub error_log: Option<String>,
+    /// The `user` directive's user, which the worker processes run as.
+    pub worker_user: Option<String>,
+    /// The `user` directive's group, if it names one.
+    pub worker_group: Option<String>,
 }
 
 impl FrontConfig {

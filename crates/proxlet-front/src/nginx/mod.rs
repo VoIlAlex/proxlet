@@ -10,7 +10,7 @@ use proxlet_core::port;
 
 use crate::apply::Step;
 use crate::config::FrontConfig;
-use crate::{FrontError, FrontServer, Installation, Plan};
+use crate::{FrontError, FrontServer, HttpsForward, Installation, Plan};
 
 pub use parse::MANAGED_MARKER;
 
@@ -105,31 +105,30 @@ pub fn parse_version_info(binary: &Path, text: &str) -> Option<Installation> {
         conf_path,
         prefix,
         default_error_log: Some(default_error_log),
+        ssl: args.contains("--with-http_ssl_module"),
     })
 }
 
-/// Renders proxlet's catch-all server block.
+/// The first nginx that loads `ssl_certificate` paths with variables at
+/// handshake time.
+pub const HTTPS_MIN_VERSION: (u32, u32, u32) = (1, 15, 9);
+
+/// Whether `version` (e.g. `1.24.0`) is at least `min`.
 #[must_use]
-pub fn render(port: u16, internal: SocketAddr, ipv6: bool) -> String {
-    let v6 = if ipv6 {
-        format!("    listen [::]:{port} default_server;\n")
-    } else {
-        String::new()
-    };
-    format!(
-        "{MANAGED_MARKER} Removed by `sudo proxlet stop`.
-# Every request nginx does not claim goes to proxlet.
-map $http_upgrade $proxlet_connection {{
-    default upgrade;
-    ''      close;
-}}
+pub fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>().unwrap_or(0));
+    let v = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    v >= min
+}
 
-server {{
-    listen {port} default_server;
-{v6}    server_name _;
-
-    location / {{
-        proxy_pass http://{internal};
+const PROXY_SETTINGS: &str = "        proxy_pass http://{internal};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -139,10 +138,105 @@ server {{
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_read_timeout 1h;
-    }}
+";
+
+/// Renders proxlet's catch-all server blocks: one on `port` when `http` is
+/// set, and one terminating TLS on the HTTPS port when `https` is set. Both
+/// forward to `internal`.
+#[must_use]
+pub fn render(
+    port: Option<u16>,
+    https: Option<&HttpsForward>,
+    internal: SocketAddr,
+    ipv6: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let proxy = PROXY_SETTINGS.replace("{internal}", &internal.to_string());
+    let listen = |port: u16, ssl: &str| {
+        let mut l = format!("    listen {port}{ssl} default_server;\n");
+        if ipv6 {
+            let _ = writeln!(l, "    listen [::]:{port}{ssl} default_server;");
+        }
+        l
+    };
+    let mut out = format!(
+        "{MANAGED_MARKER} Removed by `sudo proxlet stop`.
+# Every request nginx does not claim goes to proxlet.
+map $http_upgrade $proxlet_connection {{
+    default upgrade;
+    ''      close;
 }}
 "
-    )
+    );
+    if let Some(port) = port {
+        let _ = write!(
+            out,
+            "
+server {{
+{}    server_name _;
+
+    location / {{
+{proxy}    }}
+}}
+",
+            listen(port, "")
+        );
+    }
+    if let Some(h) = https {
+        let dir = h.cert_dir.display();
+        let _ = write!(
+            out,
+            "
+# TLS with proxlet's certificate for the requested name, read at handshake
+# time so new certificates need no reload. Only plain DNS names pick a file.
+map $ssl_server_name $proxlet_cert {{
+    ~^[A-Za-z0-9.-]+$  $ssl_server_name;
+    default            _none;
+}}
+
+server {{
+{}    server_name _;
+    ssl_certificate     {dir}/$proxlet_cert.pem;
+    ssl_certificate_key {dir}/$proxlet_cert.pem;
+
+    location / {{
+{proxy}    }}
+}}
+",
+            listen(h.port, " ssl")
+        );
+    }
+    out
+}
+
+/// The step that removes `listen`'s default-server flag in its file.
+fn move_flag(listen: &crate::config::Listen) -> Result<Step, FrontError> {
+    let path = std::fs::canonicalize(&listen.at.file).map_err(|source| FrontError::Io {
+        path: listen.at.file.clone(),
+        source,
+    })?;
+    let text = std::fs::read_to_string(&path).map_err(|source| FrontError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let from = text
+        .lines()
+        .nth(listen.at.line - 1)
+        .unwrap_or_default()
+        .to_owned();
+    let flag = listen.default_flag.as_deref().unwrap_or("default_server");
+    let to = without_flag(&from, flag).ok_or_else(|| {
+        FrontError::Layout(format!(
+            "{}: the `{flag}` flag is not on the same line as `listen`; move it there or remove it by hand",
+            listen.at
+        ))
+    })?;
+    Ok(Step::EditLine {
+        path,
+        line: listen.at.line,
+        from,
+        to,
+    })
 }
 
 /// Removes the default-server flag (`default_server` or `default`) from one line.
@@ -218,21 +312,34 @@ impl<R: CommandRunner + Send + Sync> FrontServer for Nginx<R> {
         parse::load(&inst.conf_path)
     }
 
+    fn https_support(&self, inst: &Installation) -> Result<(), String> {
+        if !version_at_least(&inst.version, HTTPS_MIN_VERSION) {
+            let (a, b, c) = HTTPS_MIN_VERSION;
+            return Err(format!(
+                "nginx {a}.{b}.{c} or newer is needed to forward HTTPS to proxlet (this is {})",
+                inst.version
+            ));
+        }
+        if !inst.ssl {
+            return Err("this nginx was built without TLS (--with-http_ssl_module)".into());
+        }
+        Ok(())
+    }
+
     fn plan_attach(
         &self,
         cfg: &FrontConfig,
         port: u16,
+        https: Option<&HttpsForward>,
         internal: SocketAddr,
         take_default: bool,
     ) -> Result<Plan, FrontError> {
-        let defaults: Vec<_> = cfg
-            .servers
-            .iter()
-            .filter(|s| !s.managed)
-            .flat_map(|s| s.listens.iter())
-            .filter(|l| l.port == port && l.default_flag.is_some())
-            .collect();
-        if !defaults.is_empty() && !take_default {
+        let has_default = |p: u16| cfg.default_server(p).is_some();
+        // A port with a default server of its own gets proxlet's block only
+        // when the user agreed to take the default over.
+        let http_port = (take_default || !has_default(port)).then_some(port);
+        let https = https.filter(|h| take_default || !has_default(h.port));
+        if http_port.is_none() && https.is_none() {
             return Ok(Plan::default());
         }
         let dir = cfg.http_includes.first().ok_or_else(|| {
@@ -243,39 +350,22 @@ impl<R: CommandRunner + Send + Sync> FrontServer for Nginx<R> {
             ))
         })?;
 
+        let ports: Vec<u16> = http_port.into_iter().chain(https.map(|h| h.port)).collect();
+        let defaults: Vec<_> = cfg
+            .servers
+            .iter()
+            .filter(|s| !s.managed)
+            .flat_map(|s| s.listens.iter())
+            .filter(|l| ports.contains(&l.port) && l.default_flag.is_some())
+            .collect();
         let mut steps = Vec::new();
         for listen in defaults {
-            let path = std::fs::canonicalize(&listen.at.file).map_err(|source| FrontError::Io {
-                path: listen.at.file.clone(),
-                source,
-            })?;
-            let text = std::fs::read_to_string(&path).map_err(|source| FrontError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            let from = text
-                .lines()
-                .nth(listen.at.line - 1)
-                .unwrap_or_default()
-                .to_owned();
-            let flag = listen.default_flag.as_deref().unwrap_or("default_server");
-            let to = without_flag(&from, flag).ok_or_else(|| {
-                FrontError::Layout(format!(
-                    "{}: the `{flag}` flag is not on the same line as `listen`; move it there or remove it by hand",
-                    listen.at
-                ))
-            })?;
-            steps.push(Step::EditLine {
-                path,
-                line: listen.at.line,
-                from,
-                to,
-            });
+            steps.push(move_flag(listen)?);
         }
         let ipv6 = cfg.servers.iter().flat_map(|s| &s.listens).any(|l| l.ipv6);
         steps.push(Step::Write {
             path: dir.dir.join(dir.file_name()),
-            contents: render(port, internal, ipv6),
+            contents: render(http_port, https, internal, ipv6),
         });
         Ok(Plan { steps })
     }
@@ -503,12 +593,66 @@ mod tests {
 
     #[test]
     fn rendered_block_is_marked_and_points_at_the_internal_listener() {
-        let r = render(80, "127.0.0.1:47080".parse().unwrap(), true);
+        let internal = "127.0.0.1:47080".parse().unwrap();
+        let r = render(Some(80), None, internal, true);
         assert!(r.starts_with(MANAGED_MARKER));
         assert!(r.contains("listen 80 default_server;"));
         assert!(r.contains("listen [::]:80 default_server;"));
         assert!(r.contains("proxy_pass http://127.0.0.1:47080;"));
         assert!(r.contains("proxy_buffering off;"));
-        assert!(!render(80, "127.0.0.1:47080".parse().unwrap(), false).contains("[::]"));
+        assert!(!r.contains("ssl"), "no HTTPS block unless asked");
+        assert!(!render(Some(80), None, internal, false).contains("[::]"));
+    }
+
+    #[test]
+    fn rendered_https_block_picks_certificates_by_plain_names_only() {
+        let internal = "127.0.0.1:47080".parse().unwrap();
+        let https = HttpsForward {
+            port: 8443,
+            cert_dir: "/srv/certs".into(),
+        };
+        let r = render(None, Some(&https), internal, true);
+        assert!(!r.contains("listen 80"), "{r}");
+        assert!(r.contains("listen 8443 ssl default_server;"));
+        assert!(r.contains("listen [::]:8443 ssl default_server;"));
+        assert!(r.contains("ssl_certificate_key /srv/certs/$proxlet_cert.pem;"));
+        assert!(r.contains("proxy_set_header X-Forwarded-Proto $scheme;"));
+        // The map lets only letters, digits, dots and hyphens through.
+        let re = regex::Regex::new("^[A-Za-z0-9.-]+$").unwrap();
+        assert!(r.contains("~^[A-Za-z0-9.-]+$  $ssl_server_name;"));
+        assert!(re.is_match("app.example.com"));
+        assert!(!re.is_match("../x") && !re.is_match("a/b") && !re.is_match(""));
+    }
+
+    #[test]
+    fn https_needs_a_new_enough_nginx_with_tls() {
+        assert!(version_at_least("1.28.3", HTTPS_MIN_VERSION));
+        assert!(version_at_least("1.15.9", HTTPS_MIN_VERSION));
+        assert!(!version_at_least("1.15.8", HTTPS_MIN_VERSION));
+        assert!(!version_at_least("1.14.2", HTTPS_MIN_VERSION));
+        assert!(version_at_least("2.0", HTTPS_MIN_VERSION));
+        let n = Nginx::new(SystemRunner);
+        let inst = |version: &str, ssl: bool| Installation {
+            binary: "nginx".into(),
+            version: version.into(),
+            conf_path: "/etc/nginx/nginx.conf".into(),
+            prefix: "/etc/nginx".into(),
+            default_error_log: None,
+            ssl,
+        };
+        assert_eq!(n.https_support(&inst("1.28.3", true)), Ok(()));
+        let old = n.https_support(&inst("1.14.2", true)).unwrap_err();
+        assert!(
+            old.contains("nginx 1.15.9 or newer") && old.contains("1.14.2"),
+            "{old}"
+        );
+        let no_tls = n.https_support(&inst("1.28.3", false)).unwrap_err();
+        assert!(no_tls.contains("without TLS"), "{no_tls}");
+        let parsed = parse_version_info(
+            Path::new("nginx"),
+            "nginx version: nginx/1.28.3\nconfigure arguments: --prefix=/etc/nginx --with-http_ssl_module\n",
+        )
+        .unwrap();
+        assert!(parsed.ssl);
     }
 }

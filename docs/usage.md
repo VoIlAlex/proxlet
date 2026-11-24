@@ -251,15 +251,20 @@ binding 443 fails; set `listen.https_port` to a high port, as with
 
 ## Behind nginx
 
-proxlet and nginx can share port 80. nginx keeps serving its own sites, and
-every request for a host nginx does not serve goes to proxlet.
+proxlet and nginx can share ports 80 and 443. nginx keeps serving its own
+sites, and every request for a host nginx does not serve goes to proxlet, over
+plain HTTP and over HTTPS.
 
 ```sh
 sudo proxlet start          # attaches if nginx is installed
 proxlet status              # mode    attached (nginx)
+                            # https   attached (nginx)
 ```
 
 ### Who holds port 80
+
+Port 443 follows exactly the same rules; nginx starting or stopping hands over
+or takes back both ports together.
 
 | Situation                      | proxlet                                                        |
 | ------------------------------ | -------------------------------------------------------------- |
@@ -285,13 +290,27 @@ proxlet hears about nginx starting in two ways:
 ### What proxlet changes in nginx
 
 `sudo proxlet start` writes one file into the first directory nginx's `http`
-block includes, such as `/etc/nginx/conf.d/proxlet.conf`. It is a server block
-marked `default_server` that forwards to proxlet with the original `Host`,
-`X-Forwarded-For` and `X-Forwarded-Proto`, WebSocket upgrades, and no
-buffering.
+block includes, such as `/etc/nginx/conf.d/proxlet.conf`. It holds two server
+blocks marked `default_server`, one for port 80 and one for port 443, that
+forward to proxlet with the original `Host`, `X-Forwarded-For` and
+`X-Forwarded-Proto`, WebSocket upgrades, and no buffering.
 
-If another nginx server is already the default for port 80 (Debian and Ubuntu
-ship one), proxlet names it and asks:
+The port 443 block terminates TLS with proxlet's certificate for the name the
+client asks for, which nginx reads when the connection is made. So a new
+`proxlet cert` works through nginx right away, with no reload, and nginx's own
+HTTPS sites keep their own certificates. A name proxlet has no certificate for
+fails the handshake (nginx logs it). This needs nginx 1.15.9 or newer built
+with TLS; with an older nginx, only the port 80 block is written and `start`
+says so.
+
+nginx's workers cannot read proxlet's state directory in your home, so
+`sudo proxlet start` creates `/var/lib/proxlet/nginx-certs` (yours, readable by
+nginx's worker group, mode `2750`) and the server keeps a copy of each
+certificate there, removed with the certificate. `sudo proxlet stop` deletes
+the directory.
+
+If another nginx server is already the default for port 80 or 443 (Debian and
+Ubuntu ship one for port 80), proxlet names each of them and asks once:
 
 ```text
 ? nginx sends requests for hosts it does not serve to its default server at
@@ -300,15 +319,17 @@ ship one), proxlet names it and asks:
 
 - **Yes** (or `sudo proxlet start --yes`): proxlet removes `default_server` from
   that line and puts it on its own block.
-- **No**, or no terminal: proxlet changes nothing in nginx, and requests for
-  hosts nginx does not serve keep going to nginx's default server.
+- **No**, or no terminal: those ports keep nginx's default server, and
+  requests on them for hosts nginx does not serve keep going there. A port
+  with no default server of its own still gets proxlet's block.
 
 Every change is checked with `nginx -t`, written atomically, and followed by a
 reload. If any step fails, every file is put back and nginx keeps running its
 previous config.
 
-`sudo proxlet stop` undoes all of it: it removes proxlet's file and the systemd
-drop-in, restores the `default_server` flag, and reloads nginx. If you edited
+`sudo proxlet stop` undoes all of it: it removes proxlet's file, the systemd
+drop-in and the certificate directory, restores the `default_server` flags, and
+reloads nginx. If you edited
 one of those lines in the meantime, proxlet leaves it alone and tells you.
 
 What proxlet changed is recorded in `front.json` in its state directory, so
@@ -342,7 +363,9 @@ empty for other rules.
 `proxlet config attach.enabled off` makes proxlet treat nginx like any other
 process holding the port: it never reads, writes or hooks nginx's config.
 
-HTTPS (port 443) is not attached yet; it arrives with certificates.
+If proxlet attached before it could forward HTTPS, `proxlet status` says
+`HTTPS is not forwarded to proxlet yet`; run `sudo proxlet start` again to add
+the port 443 block.
 
 ## The configuration file
 

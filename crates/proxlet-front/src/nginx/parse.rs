@@ -322,6 +322,10 @@ impl Reader {
                         self.visit(&inner, ctx, inner_managed, depth + 1)?;
                     }
                 }
+                ("user", Ctx::Main) => {
+                    self.cfg.worker_user = d.args.first().cloned();
+                    self.cfg.worker_group = d.args.get(1).cloned();
+                }
                 ("error_log", Ctx::Main) => {
                     if let Some(p) = d.args.first() {
                         self.cfg.error_log = Some(p.clone());

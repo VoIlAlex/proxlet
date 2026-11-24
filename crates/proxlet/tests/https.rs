@@ -216,3 +216,40 @@ fn probe_tokens_are_answered() {
     );
     assert_eq!((status, got.as_str()), (200, body.as_str()));
 }
+
+#[test]
+fn certificates_are_published_for_nginx_and_unpublished_on_rm() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    let published = home.path().join("published");
+    std::fs::create_dir_all(&published).unwrap();
+    std::fs::create_dir_all(home.path().join("state")).unwrap();
+    std::fs::write(
+        home.path().join("state/front.json"),
+        format!(
+            r#"{{"front":"nginx","port":80,"internal":"127.0.0.1:47080","entries":[],"https_port":443,"cert_dir":"{}","cert_dir_created":true}}"#,
+            published.display()
+        ),
+    )
+    .unwrap();
+    let daemon = home.start();
+    assert!(issue(&home, "app.example.com").ok);
+    let copy = published.join("app.example.com.pem");
+    let mode = std::fs::metadata(&copy).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o640, "{mode:o}");
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        std::fs::read(home.path().join("state/certs/app.example.com.pem")).unwrap()
+    );
+
+    // Removed while running: the server deletes the copy.
+    home.run(&["cert", "rm", "app.example.com"]).ok();
+    assert!(!copy.exists(), "published copy left behind");
+
+    // Removed while stopped: `cert rm` deletes it itself.
+    assert!(issue(&home, "b.example.com").ok);
+    assert!(published.join("b.example.com.pem").exists());
+    assert_eq!(daemon.stop(), 0);
+    home.run(&["cert", "rm", "b.example.com"]).ok();
+    assert!(!published.join("b.example.com.pem").exists());
+}

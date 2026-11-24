@@ -351,6 +351,7 @@ pub fn rm(locations: &Locations, domains: &[String]) -> CmdResult {
         if check_public(&domain).is_err() || !store.remove(&domain)? {
             return Err(unknown(raw, &store));
         }
+        crate::certs::unpublish(&locations.state_dir, &domain);
         output::success(format!("Removed the certificate for {domain}"));
     }
     if let Ok(mut c) = Client::connect(&locations.socket()) {

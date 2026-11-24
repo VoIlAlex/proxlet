@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use proxlet_core::command::SystemRunner;
 use proxlet_front::apply::Step;
-use proxlet_front::{FrontServer, Installation, Nginx};
+use proxlet_front::{FrontServer, HttpsForward, Installation, Nginx};
 
 struct Layout {
     dir: tempfile::TempDir,
@@ -37,6 +37,7 @@ impl Layout {
             conf_path: self.conf.clone(),
             prefix: self.root().to_owned(),
             default_error_log: Some(self.root().join("log/error.log")),
+            ssl: true,
         }
     }
 }
@@ -243,7 +244,7 @@ fn plan_on_debian_moves_both_default_flags_through_the_symlink() {
     let l = debian();
     let n = nginx();
     let cfg = n.read(&l.inst()).unwrap();
-    let plan = n.plan_attach(&cfg, 80, internal(), true).unwrap();
+    let plan = n.plan_attach(&cfg, 80, None, internal(), true).unwrap();
     let target = fs::canonicalize(l.root().join("etc/nginx/sites-available/default")).unwrap();
     assert_eq!(
         plan.steps[..2],
@@ -271,7 +272,7 @@ fn plan_on_debian_moves_both_default_flags_through_the_symlink() {
 
     // Declined: nothing is planned.
     assert!(
-        n.plan_attach(&cfg, 80, internal(), false)
+        n.plan_attach(&cfg, 80, None, internal(), false)
             .unwrap()
             .is_empty()
     );
@@ -282,7 +283,7 @@ fn plan_on_rhel_writes_only_the_block() {
     let l = rhel();
     let n = nginx();
     let cfg = n.read(&l.inst()).unwrap();
-    let plan = n.plan_attach(&cfg, 80, internal(), false).unwrap();
+    let plan = n.plan_attach(&cfg, 80, None, internal(), false).unwrap();
     assert_eq!(plan.steps.len(), 1);
     let Step::Write { path, .. } = &plan.steps[0] else {
         panic!("{plan:?}");
@@ -295,7 +296,7 @@ fn plan_on_homebrew_uses_the_servers_directory() {
     let l = homebrew();
     let n = nginx();
     let cfg = n.read(&l.inst()).unwrap();
-    let plan = n.plan_attach(&cfg, 80, internal(), false).unwrap();
+    let plan = n.plan_attach(&cfg, 80, None, internal(), false).unwrap();
     let Step::Write { path, contents } = &plan.steps[0] else {
         panic!("{plan:?}");
     };
@@ -313,7 +314,7 @@ fn plan_without_an_included_directory_explains_what_to_add() {
     let n = nginx();
     let cfg = n.read(&l.inst()).unwrap();
     let err = n
-        .plan_attach(&cfg, 80, internal(), false)
+        .plan_attach(&cfg, 80, None, internal(), false)
         .unwrap_err()
         .to_string();
     assert!(err.contains("include /etc/nginx/conf.d/*.conf;"), "{err}");
@@ -324,7 +325,7 @@ fn proxlets_own_block_is_recognised_after_writing() {
     let l = rhel();
     let n = nginx();
     let cfg = n.read(&l.inst()).unwrap();
-    let plan = n.plan_attach(&cfg, 80, internal(), false).unwrap();
+    let plan = n.plan_attach(&cfg, 80, None, internal(), false).unwrap();
     for step in &plan.steps {
         if let Step::Write { path, contents } = step {
             fs::write(path, contents).unwrap();
@@ -335,4 +336,112 @@ fn proxlets_own_block_is_recognised_after_writing() {
     // proxlet's own default never counts as someone else's.
     assert!(after.default_server(80).is_none());
     assert!(after.claims("anything.example", 80).is_none());
+}
+
+fn https() -> HttpsForward {
+    HttpsForward {
+        port: 443,
+        cert_dir: "/var/lib/proxlet/nginx-certs".into(),
+    }
+}
+
+#[test]
+fn plan_with_https_adds_a_tls_block_that_reads_proxlets_certificates() {
+    let l = rhel();
+    let n = nginx();
+    let cfg = n.read(&l.inst()).unwrap();
+    let plan = n
+        .plan_attach(&cfg, 80, Some(&https()), internal(), false)
+        .unwrap();
+    let Step::Write { contents, .. } = &plan.steps[0] else {
+        panic!("{plan:?}");
+    };
+    assert!(contents.contains("listen 80 default_server;"), "{contents}");
+    assert!(
+        contents.contains("listen 443 ssl default_server;"),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("ssl_certificate     /var/lib/proxlet/nginx-certs/$proxlet_cert.pem;"),
+        "{contents}"
+    );
+    assert!(contents.contains("~^[A-Za-z0-9.-]+$  $ssl_server_name;"));
+    assert_eq!(
+        contents
+            .matches("proxy_pass http://127.0.0.1:47080;")
+            .count(),
+        2
+    );
+
+    // Written, it is proxlet's own block on both ports.
+    fs::write(l.root().join("etc/nginx/conf.d/proxlet.conf"), contents).unwrap();
+    let after = n.read(&l.inst()).unwrap();
+    assert!(after.has_managed_block());
+    assert!(after.default_server(443).is_none());
+}
+
+#[test]
+fn default_on_port_443_too_moves_both_flags() {
+    let l = rhel();
+    l.write(
+        "etc/nginx/conf.d/main.conf",
+        "server {\n    listen 80 default_server;\n    server_name main.example;\n    listen 443 ssl default_server;\n}\n",
+    );
+    let n = nginx();
+    let cfg = n.read(&l.inst()).unwrap();
+    assert!(cfg.default_server(80).is_some() && cfg.default_server(443).is_some());
+    let plan = n
+        .plan_attach(&cfg, 80, Some(&https()), internal(), true)
+        .unwrap();
+    let edited: Vec<usize> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::EditLine { line, .. } => Some(*line),
+            Step::Write { .. } => None,
+        })
+        .collect();
+    assert_eq!(edited, [2, 4]);
+
+    // Declined: both ports keep their default, so nothing is written.
+    assert!(
+        n.plan_attach(&cfg, 80, Some(&https()), internal(), false)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn declining_only_skips_the_port_that_has_a_default() {
+    let l = rhel();
+    l.write(
+        "etc/nginx/conf.d/tls.conf",
+        "server {\n    listen 443 ssl default_server;\n    server_name tls.example;\n}\n",
+    );
+    let n = nginx();
+    let cfg = n.read(&l.inst()).unwrap();
+    let plan = n
+        .plan_attach(&cfg, 80, Some(&https()), internal(), false)
+        .unwrap();
+    assert_eq!(plan.steps.len(), 1, "no flag is moved: {plan:?}");
+    let Step::Write { contents, .. } = &plan.steps[0] else {
+        panic!("{plan:?}");
+    };
+    assert!(contents.contains("listen 80 default_server;"));
+    assert!(!contents.contains("443"), "{contents}");
+}
+
+#[test]
+fn worker_user_and_group_are_read() {
+    let l = layout("nginx.conf");
+    l.write("nginx.conf", "user www-data;\nhttp {}\n");
+    let cfg = nginx().read(&l.inst()).unwrap();
+    assert_eq!(cfg.worker_user.as_deref(), Some("www-data"));
+    assert_eq!(cfg.worker_group, None);
+    l.write("nginx.conf", "user nginx web;\nhttp {}\n");
+    let cfg = nginx().read(&l.inst()).unwrap();
+    assert_eq!(
+        (cfg.worker_user.as_deref(), cfg.worker_group.as_deref()),
+        (Some("nginx"), Some("web"))
+    );
 }

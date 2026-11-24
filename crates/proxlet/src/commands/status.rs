@@ -51,6 +51,9 @@ pub fn run(locations: &Locations) -> CmdResult {
     {
         output::warn(format!("{front} is not forwarding to proxlet yet"));
         output::note("Set it up with: sudo proxlet start");
+    } else if s.mode.starts_with("attached (") && https_not_forwarded(locations) {
+        output::warn("HTTPS is not forwarded to proxlet yet");
+        output::note("Set it up with: sudo proxlet start");
     }
     Ok(())
 }
@@ -61,6 +64,22 @@ fn front_forwards(locations: &Locations) -> bool {
         return true;
     };
     attach::front_config(&config.settings).is_none_or(|(_, cfg)| cfg.has_managed_block())
+}
+
+/// Whether proxlet attached before it could forward HTTPS (an old ledger)
+/// while the front server could do it now.
+fn https_not_forwarded(locations: &Locations) -> bool {
+    let Ok(Some(ledger)) = proxlet_front::Ledger::load(&locations.state_dir.join(attach::LEDGER))
+    else {
+        return false;
+    };
+    if ledger.https_port.is_some() {
+        return false;
+    }
+    let front = attach::system_front();
+    front
+        .detect()
+        .is_some_and(|inst| front.https_support(&inst).is_ok())
 }
 
 /// Where requests reach proxlet, given its mode.

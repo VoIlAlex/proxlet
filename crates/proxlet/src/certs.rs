@@ -51,7 +51,7 @@ pub struct Certs {
     engine: Arc<Engine>,
     https_mode: watch::Receiver<Mode>,
     https_port: u16,
-    front_forwards_https: Box<dyn Fn() -> bool + Send + Sync>,
+    ledger: PathBuf,
     order: tokio::sync::Mutex<()>,
     cas: Mutex<HashMap<String, Arc<dyn Ca>>>,
     fake: Option<Arc<FakeAcme>>,
@@ -75,8 +75,9 @@ pub struct Renewed {
 }
 
 impl Certs {
-    /// Certificates stored under `state_dir`. `front_forwards_https` says
-    /// whether a front server holding the HTTPS port forwards it to proxlet.
+    /// Certificates stored under `state_dir`. The attach ledger there says
+    /// whether a front server holding the HTTPS port forwards it to proxlet,
+    /// and where to publish certificates for it.
     ///
     /// # Panics
     ///
@@ -88,7 +89,6 @@ impl Certs {
         engine: Arc<Engine>,
         https_mode: watch::Receiver<Mode>,
         https_port: u16,
-        front_forwards_https: Box<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         let fake = std::env::var(FAKE_ACME_ENV).ok().map(|secs| {
             let acme = FakeAcme::new(FakeCa::new()).with_terms("https://fake-acme.invalid/terms");
@@ -108,7 +108,7 @@ impl Certs {
             engine,
             https_mode,
             https_port,
-            front_forwards_https,
+            ledger: state_dir.join(crate::attach::LEDGER),
             order: tokio::sync::Mutex::new(()),
             cas: Mutex::new(HashMap::new()),
             fake,
@@ -149,7 +149,37 @@ impl Certs {
         let count = map.len();
         self.resolver.replace(map);
         self.refresh_view();
+        self.publish(&listing.certs);
         count
+    }
+
+    /// Copies every certificate to the directory the front server reads them
+    /// from, if that is not the store itself, and deletes copies of removed
+    /// certificates (design decision 8).
+    fn publish(&self, certs: &[Stored]) {
+        let Some(dir) = crate::attach::published_cert_dir(&self.ledger, self.store.dir()) else {
+            return;
+        };
+        if !dir.is_dir() {
+            tracing::warn!(
+                "{} does not exist; nginx cannot read proxlet's certificates until `sudo proxlet start` creates it",
+                dir.display()
+            );
+            return;
+        }
+        for cert in certs {
+            let target = dir.join(format!("{}.pem", cert.domain));
+            let result = std::fs::read(&cert.path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    proxlet_cert::store::write_atomic(&target, &bytes, 0o640)
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(e) = result {
+                tracing::warn!("cannot publish {} for nginx: {e}", cert.domain);
+            }
+        }
+        unpublish_stale(&dir, certs);
     }
 
     /// Whether HTTPS is being served right now (design decision 4).
@@ -157,7 +187,7 @@ impl Certs {
     pub fn https_served(&self) -> bool {
         match &*self.https_mode.borrow() {
             Mode::Standalone => true,
-            Mode::Attached { .. } => (self.front_forwards_https)(),
+            Mode::Attached { .. } => crate::attach::forwards_https(&self.ledger),
             Mode::Waiting { .. } | Mode::Released => false,
         }
     }
@@ -304,6 +334,34 @@ impl Certs {
             }
         }
         (listing.certs.len(), warnings)
+    }
+}
+
+/// Deletes published `<domain>.pem` files whose certificate is gone.
+fn unpublish_stale(dir: &Path, certs: &[Stored]) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(domain) = name.to_str().and_then(|n| n.strip_suffix(".pem")) else {
+            continue;
+        };
+        if proxlet_cert::check_public(domain).as_deref() == Ok(domain)
+            && !certs.iter().any(|c| c.domain == domain)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Deletes the published copy of `domain`'s certificate, for `cert rm` while
+/// the server is stopped.
+pub fn unpublish(state_dir: &Path, domain: &str) {
+    let ledger = state_dir.join(crate::attach::LEDGER);
+    let store = state_dir.join("certs");
+    if let Some(dir) = crate::attach::published_cert_dir(&ledger, &store) {
+        let _ = std::fs::remove_file(dir.join(format!("{domain}.pem")));
     }
 }
 

@@ -42,11 +42,11 @@
 
 ## 7. HTTPS behind nginx (proxlet-front, proxlet)
 
-- [ ] 7.1 Render the port 443 block with the SNI `map` (decision 7) when nginx is 1.15.9 or newer and built with the SSL module; skip it with a warning otherwise; verify with render tests (marker, `default_server`, IPv6, `map` rejecting `../x`) and version-gate tests for 1.14 and 1.28
-- [ ] 7.2 Make `plan_attach`, the takeover question and the ledger handle a list of ports (old ledgers read as port 80 only); verify with tests for "Default on port 443 too", a declined 443 takeover, and an old ledger still detaching cleanly
-- [ ] 7.3 Create the publish directory as root during `start` (service user, nginx worker group, `2750`) and record it in the ledger; have the daemon copy certificates there (`0640`, atomic) on startup and on every change, delete stale copies, and remove the directory on `stop`; verify with service tests using the fake nginx, and a daemon test that a removed certificate's published copy disappears
-- [ ] 7.4 Report in `status` when an attach predates HTTPS forwarding ("HTTPS is not forwarded to proxlet yet", suggesting `sudo proxlet start`); verify with a status test using an old-format ledger
-- [ ] 7.5 Update "Behind nginx" in `docs/usage.md` (the 443 block, the publish directory, nginx version needs) and the "Adding a front server" section of `docs/extending.md`
+- [x] 7.1 Render the port 443 block with the SNI `map` (decision 7) when nginx is 1.15.9 or newer and built with the SSL module; skip it with a warning otherwise; verify with render tests (marker, `default_server`, IPv6, `map` rejecting `../x`) and version-gate tests for 1.14 and 1.28
+- [x] 7.2 Make `plan_attach`, the takeover question and the ledger handle a list of ports (old ledgers read as port 80 only); verify with tests for "Default on port 443 too", a declined 443 takeover, and an old ledger still detaching cleanly
+- [x] 7.3 Create the publish directory as root during `start` (service user, nginx worker group, `2750`) and record it in the ledger; have the daemon copy certificates there (`0640`, atomic) on startup and on every change, delete stale copies, and remove the directory on `stop`; verify with service tests using the fake nginx, and a daemon test that a removed certificate's published copy disappears
+- [x] 7.4 Report in `status` when an attach predates HTTPS forwarding ("HTTPS is not forwarded to proxlet yet", suggesting `sudo proxlet start`); verify with a status test using an old-format ledger
+- [x] 7.5 Update "Behind nginx" in `docs/usage.md` (the 443 block, the publish directory, nginx version needs) and the "Adding a front server" section of `docs/extending.md`
 
 ## 8. End to end, CI and release notes
 

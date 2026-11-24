@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,9 @@ pub fn run(locations: &Locations) -> CmdResult {
 }
 
 async fn run_async(locations: &Locations) -> CmdResult {
+    // Before anything can observe the server (the control socket), so a stop
+    // signal is never met by the default action, which kills the process.
+    let term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let socket = locations.socket();
     if control::running(&socket).is_some() {
         return Err(Failure::new("proxlet is already running").hint("See it with: proxlet status"));
@@ -86,7 +89,6 @@ async fn run_async(locations: &Locations) -> CmdResult {
         engine.clone(),
         wiring.https_mode.clone(),
         https_listen.port(),
-        Box::new(|| false),
     ));
     let cert_count = certs.reload();
     let state = Arc::new(State {
@@ -142,7 +144,7 @@ async fn run_async(locations: &Locations) -> CmdResult {
     ));
     spawn_cert_tasks(certs, &state, &stop_rx);
 
-    wait_for_stop(stop_rx).await?;
+    wait_for_stop(term, stop_rx).await;
     stop_serving(&state, [internal_task, owner_task, https_task], conns).await;
     if attached_here {
         detach_in_foreground(&*front, &ledger);
@@ -226,14 +228,12 @@ fn log_start(rules: usize, state: &State, http: bool, https: bool, certs: usize)
 }
 
 /// Waits for Ctrl-C, SIGTERM or a `shutdown` request.
-async fn wait_for_stop(mut stop: watch::Receiver<bool>) -> std::io::Result<()> {
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+async fn wait_for_stop(mut term: tokio::signal::unix::Signal, mut stop: watch::Receiver<bool>) {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
         _ = stop.changed() => {}
     }
-    Ok(())
 }
 
 /// The owner of a public port, serving TLS when `tls` is set.
@@ -312,6 +312,12 @@ fn foreground_attach<'a>(
         ledger: ledger.to_owned(),
         owner: None,
         hook: None,
+        // A user-writable nginx runs as this user and can read the store.
+        cert_dir: attach::CertDir::Existing(
+            ledger
+                .parent()
+                .map_or_else(|| PathBuf::from("certs"), |d| d.join("certs")),
+        ),
         yes: false,
         confirm,
     }
@@ -342,14 +348,26 @@ fn attach_in_foreground(
     match foreground_attach(front, ledger, &confirm).attach(settings) {
         Ok(a) => {
             match &a.outcome {
-                attach::Outcome::Attached { wrote, .. } => tracing::info!(
-                    "attached to {}{}",
-                    a.front,
-                    wrote
-                        .as_ref()
-                        .map(|w| format!(" ({})", w.display()))
-                        .unwrap_or_default()
-                ),
+                attach::Outcome::Attached {
+                    wrote,
+                    kept_default,
+                    ..
+                } => {
+                    tracing::info!(
+                        "attached to {}{}",
+                        a.front,
+                        wrote
+                            .as_ref()
+                            .map(|w| format!(" ({})", w.display()))
+                            .unwrap_or_default()
+                    );
+                    for at in kept_default {
+                        tracing::warn!(
+                            "{} keeps its own default server at {at}; requests on that port for hosts it does not serve go there",
+                            a.front
+                        );
+                    }
+                }
                 attach::Outcome::Declined { default_at } => tracing::warn!(
                     "{} keeps its own default server at {default_at}; requests for hosts it does not serve go there",
                     a.front

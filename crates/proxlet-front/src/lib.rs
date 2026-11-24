@@ -72,6 +72,19 @@ pub struct Installation {
     pub prefix: PathBuf,
     /// The error log compiled in as the default.
     pub default_error_log: Option<PathBuf>,
+    /// Whether it was built with TLS support.
+    pub ssl: bool,
+}
+
+/// How a front server should forward HTTPS to proxlet (design decision 7 of
+/// `add-cert`): it terminates TLS on `port` with proxlet's certificate for the
+/// requested name, read from `cert_dir/<name>.pem` at handshake time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsForward {
+    /// The public HTTPS port, e.g. 443.
+    pub port: u16,
+    /// Where the front server reads proxlet's certificates.
+    pub cert_dir: PathBuf,
 }
 
 /// What proxlet should change in a front server's config to attach.
@@ -105,10 +118,18 @@ pub trait FrontServer: Send + Sync {
     ///
     /// When a config file cannot be read or parsed.
     fn read(&self, inst: &Installation) -> Result<FrontConfig, FrontError>;
+    /// Whether this installation can forward HTTPS to proxlet; the reason when
+    /// it cannot (too old, built without TLS).
+    ///
+    /// # Errors
+    ///
+    /// With a sentence saying why HTTPS cannot be forwarded.
+    fn https_support(&self, inst: &Installation) -> Result<(), String>;
     /// What to write so that every request the front server does not claim on
-    /// `port` goes to `internal`. With `take_default`, also moves an existing
-    /// default-server flag to proxlet's block; without it and with such a flag
-    /// present, the plan is empty.
+    /// `port` (and, with `https`, on the HTTPS port) goes to `internal`. With
+    /// `take_default`, also moves existing default-server flags to proxlet's
+    /// blocks; without it, a port that has a default server of its own gets no
+    /// block from proxlet. A plan with no block is empty.
     ///
     /// # Errors
     ///
@@ -117,6 +138,7 @@ pub trait FrontServer: Send + Sync {
         &self,
         cfg: &FrontConfig,
         port: u16,
+        https: Option<&HttpsForward>,
         internal: SocketAddr,
         take_default: bool,
     ) -> Result<Plan, FrontError>;

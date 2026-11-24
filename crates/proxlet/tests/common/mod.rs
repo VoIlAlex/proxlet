@@ -287,8 +287,8 @@ impl Home {
                 "#!/bin/sh\n\
                  ROOT='{0}'\n\
                  case \"$1\" in\n\
-                 -V) echo 'nginx version: nginx/1.24.0' >&2\n\
-                 \x20   echo \"configure arguments: --prefix=$ROOT --conf-path=$ROOT/nginx.conf --error-log-path=$ROOT/error.log\" >&2 ;;\n\
+                 -V) echo 'nginx version: nginx/1.28.0' >&2\n\
+                 \x20   echo \"configure arguments: --prefix=$ROOT --conf-path=$ROOT/nginx.conf --error-log-path=$ROOT/error.log --with-http_ssl_module\" >&2 ;;\n\
                  -t) if grep -rqs bogus \"$ROOT/conf.d\" \"$ROOT/sites-enabled\"; then\n\
                  \x20     echo 'nginx: [emerg] unknown directive \"bogus\"' >&2; exit 1\n\
                  \x20   fi ;;\n\
