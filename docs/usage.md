@@ -111,9 +111,14 @@ proxlet config static.listing off     # change it
 | `attach.port`           | `47080`      | on restart  | Loopback port nginx forwards to when proxlet is attached       |
 | `tls.redirect`          | `on`         | immediately | Redirect plain HTTP to HTTPS for hosts that have a certificate |
 | `cert.server`           | `production` | immediately | Where certificates come from: `production`, `staging` or a URL |
+| `log.access`            | `on`         | immediately | Record every request in the [log files](#logs)                 |
+| `log.max_size`          | `100MB`      | immediately | Delete the oldest log files beyond this total size             |
+| `log.max_age`           | `7d`         | immediately | Delete log files older than this                               |
 
 Booleans accept `on`/`off` and `true`/`false`. Durations are a number with `ms`,
-`s` or `m`, for example `500ms`, `30s` or `2m`. `cert.server` is `production`
+`s`, `m`, `h` or `d`, for example `500ms`, `30s`, `2m` or `7d`. Sizes are a
+number with `KB`, `MB` or `GB`, in powers of 1024, for example `100MB` or `1GB`;
+`log.max_size` is at least `10MB`, the size of one log file. `cert.server` is `production`
 (Let's Encrypt), `staging` (Let's Encrypt's test environment, whose
 certificates browsers do not trust) or the `https://` directory URL of any ACME
 server. The HTTP, HTTPS and attach ports must all differ.

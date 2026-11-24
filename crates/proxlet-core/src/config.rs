@@ -256,7 +256,7 @@ fn item_to_setting_text(item: &Item, kind: Kind) -> Option<String> {
             .map(|b| if b { "on" } else { "off" }.to_owned())
             .or_else(|| v.as_str().map(str::to_owned)),
         Kind::Port => v.as_integer().map(|i| i.to_string()),
-        Kind::Ip | Kind::Duration | Kind::AcmeServer => v.as_str().map(str::to_owned),
+        Kind::Ip | Kind::Duration | Kind::Size | Kind::AcmeServer => v.as_str().map(str::to_owned),
     }
 }
 
@@ -264,7 +264,9 @@ fn setting_to_item(v: &Value) -> Item {
     match v {
         Value::Bool(b) => value(*b),
         Value::Port(p) => value(i64::from(*p)),
-        Value::Ip(_) | Value::Duration(_) | Value::AcmeServer(_) => value(v.to_string()),
+        Value::Ip(_) | Value::Duration(_) | Value::Size(_) | Value::AcmeServer(_) => {
+            value(v.to_string())
+        }
     }
 }
 

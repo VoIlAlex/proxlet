@@ -2,14 +2,14 @@
 
 ## 1. Settings (proxlet-core)
 
-- [ ] 1.1 Accept `h` and `d` in durations and format them in the largest exact unit; add `Kind::Size` (`KB`/`MB`/`GB`, powers of 1024) with formatting; verify with unit tests for parsing, formatting and rejected values
-- [ ] 1.2 Add `log.access` (`on`), `log.max_size` (`100MB`, at least `10MB`) and `log.max_age` (`7d`), all live; verify with unit tests for defaults, and CLI tests for "Days and sizes" and "Size too small"
-- [ ] 1.3 Document the settings and the new value forms in the settings table of `docs/usage.md`
+- [x] 1.1 Accept `h` and `d` in durations and format them in the largest exact unit; add `Kind::Size` (`KB`/`MB`/`GB`, powers of 1024) with formatting; verify with unit tests for parsing, formatting and rejected values
+- [x] 1.2 Add `log.access` (`on`), `log.max_size` (`100MB`, at least `10MB`) and `log.max_age` (`7d`), all live; verify with unit tests for defaults, and CLI tests for "Days and sizes" and "Size too small"
+- [x] 1.3 Document the settings and the new value forms in the settings table of `docs/usage.md`
 
 ## 2. Access records in the engine (proxlet-server)
 
-- [ ] 2.1 Add `AccessRecord`, the `AccessLog` trait and `Engine::set_access_log`; record the client (peer, or the first `X-Forwarded-For` entry from the front origin), method, lowercase host without port, path without query, rule and target in `handle_from`, including challenge, redirect and no-rule answers; verify with server tests that use a recording sink for "Proxied request" (no query), "Behind nginx", a no-rule request and a redirect
-- [ ] 2.2 Wrap response bodies in a counting body that emits the record once from `Drop`, with status, bytes and duration; pass the proxy error reason out of `proxy::forward`; skip recording when `log.access` is off; verify with server tests for "Upstream down", "Streaming response" (total bytes and full duration), a client hanging up mid-stream, a WebSocket upgrade (one record, status 101), and "Access logging off" applied live
+- [x] 2.1 Add `AccessRecord`, the `AccessLog` trait and `Engine::set_access_log`; record the client (peer, or the first `X-Forwarded-For` entry from the front origin), method, lowercase host without port, path without query, rule and target in `handle_from`, including challenge, redirect and no-rule answers; verify with server tests that use a recording sink for "Proxied request" (no query), "Behind nginx", a no-rule request and a redirect
+- [x] 2.2 Wrap response bodies in a counting body that emits the record once from `Drop`, with status, bytes and duration; pass the proxy error reason out of `proxy::forward`; skip recording when `log.access` is off; verify with server tests for "Upstream down", "Streaming response" (total bytes and full duration), a client hanging up mid-stream, a WebSocket upgrade (one record, status 101), and "Access logging off" applied live
 
 ## 3. Writer, rotation and retention (proxlet)
 

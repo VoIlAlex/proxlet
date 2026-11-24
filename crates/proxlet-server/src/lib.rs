@@ -5,6 +5,7 @@
 //! so replacing the snapshot never affects in-flight requests and the request
 //! path takes no lock.
 
+mod access;
 mod files;
 mod proxy;
 mod response;
@@ -30,6 +31,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+pub use access::{AccessLog, AccessRecord};
 pub use snapshot::{BuildError, Snapshot};
 
 /// Error type carried by response bodies.
@@ -64,6 +66,7 @@ pub struct Engine {
     client: ArcSwap<ClientSlot>,
     challenges: ArcSwap<HashMap<String, String>>,
     tls: ArcSwap<TlsView>,
+    access_log: ArcSwap<Option<Arc<dyn AccessLog>>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -87,6 +90,7 @@ impl Engine {
             }),
             challenges: ArcSwap::from_pointee(HashMap::new()),
             tls: ArcSwap::from_pointee(TlsView::default()),
+            access_log: ArcSwap::from_pointee(None),
         })
     }
 
@@ -117,6 +121,12 @@ impl Engine {
     #[must_use]
     pub fn tls_view(&self) -> Arc<TlsView> {
         self.tls.load_full()
+    }
+
+    /// Sends a record of every request answered from now on to `log`, while
+    /// the `log.access` setting is on.
+    pub fn set_access_log(&self, log: Arc<dyn AccessLog>) {
+        self.access_log.store(Arc::new(Some(log)));
     }
 
     /// Atomically replaces the snapshot. In-flight requests finish on the old one.
@@ -160,23 +170,58 @@ impl Engine {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned)
             });
-        if let Some(resp) = self.challenge_response(&req) {
-            return resp;
+        let sink = if snap.settings.log_access {
+            Option::clone(&self.access_log.load())
+        } else {
+            None
+        };
+        let pending =
+            sink.map(|sink| access::Pending::start(sink, peer, origin, host.as_deref(), &req));
+        let (resp, served) = self.respond(&snap, peer, origin, host, req).await;
+        match pending {
+            Some(p) => p.finish(resp, served),
+            None => resp,
         }
-        if let Some(resp) = self.redirect(&snap, origin, host.as_deref(), &req) {
-            return resp;
+    }
+
+    async fn respond(
+        &self,
+        snap: &Snapshot,
+        peer: SocketAddr,
+        origin: Origin,
+        host: Option<String>,
+        req: Request<Incoming>,
+    ) -> (Response<Body>, access::Served) {
+        if let Some(resp) = self.challenge_response(&req) {
+            return (resp, access::Served::other("acme-challenge"));
+        }
+        if let Some(resp) = self.redirect(snap, origin, host.as_deref(), &req) {
+            return (resp, access::Served::other("redirect"));
         }
         let Some(m) = snap.table.lookup(host.as_deref(), req.uri().path()) else {
-            return response::no_rule(host.as_deref(), req.uri().path());
+            let resp = response::no_rule(host.as_deref(), req.uri().path());
+            return (resp, access::Served::default());
         };
         match m.value {
             snapshot::Handler::Proxy(target) => {
+                let served = access::Served {
+                    rule: Some(target.route.clone()),
+                    target: Some(target.authority.to_string()),
+                };
                 let client = self.client.load().client.clone();
                 let timeout = snap.settings.proxy_timeout;
-                proxy::forward(client, timeout, target, peer, origin, host, req).await
+                let resp = proxy::forward(client, timeout, target, peer, origin, host, req).await;
+                (resp, served)
             }
             snapshot::Handler::Files(target) => {
-                files::serve(&snap.settings, target, m.prefix, &req).await
+                let served = access::Served {
+                    rule: Some(target.route.clone()),
+                    target: Some(target.root.display().to_string()),
+                };
+                (
+                    files::serve(&snap.settings, target, m.prefix, &req).await,
+                    served,
+                )
             }
         }
     }
