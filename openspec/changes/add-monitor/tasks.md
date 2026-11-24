@@ -95,7 +95,7 @@
 
 ## 4. End to end and release notes
 
-- [ ] 4.1 Extend the CI `systemd` job: after requests to the running service,
+- [x] 4.1 Extend the CI `systemd` job: after requests to the running service,
   `proxlet monitor --once` shows the rule's row with a non-zero total. Verify
   that the job passes.
 - [x] 4.2 Update `README.md` (status, roadmap) and `CHANGELOG.md`, and write
