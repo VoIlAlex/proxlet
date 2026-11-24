@@ -76,6 +76,8 @@ build on the same records.
   - `proxlet-core`: settings and value kinds.
 - **External state:** up to 100 MB (by default) of log files in the state
   directory.
-- **Dependencies:** none new. `serde_json`, `tracing` and
-  `tracing-subscriber` are already used.
+- **Dependencies:** `serde_json`, `tracing` and `tracing-subscriber` are
+  already used. `time`, already built for certificates, becomes a direct
+  dependency of `proxlet` with its `local-offset` feature, so `proxlet logs`
+  shows local times; that adds the small `num_threads` crate.
 - **Docs:** `docs/usage.md` (logs section, settings table), README.
