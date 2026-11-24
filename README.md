@@ -8,9 +8,9 @@ a path or a domain to a local port or a folder. It runs on its own, or attaches
 to an nginx that already owns ports 80 and 443.
 
 > **Status: early development.** Rules, proxying, static files, settings, the
-> system service, attaching behind nginx, and Let's Encrypt certificates with
-> HTTPS work today; the rest of the commands below are being built change by
-> change. See [Roadmap](#roadmap).
+> system service, attaching behind nginx, Let's Encrypt certificates with
+> HTTPS, and request logs work today; `monitor` and `ai` are being built
+> change by change. See [Roadmap](#roadmap).
 
 ## What it looks like
 
@@ -25,8 +25,8 @@ proxlet ls                         # list rules
 proxlet rm /files                  # remove a rule
 proxlet status                     # running? standalone or attached to nginx?
 
-proxlet logs /api                  # follow logs for a route, a domain or a port
-proxlet logs --all | grep 502      # dump everything for grep
+proxlet logs /api                  # follow requests for a route, a domain or a port
+proxlet logs --all | grep " 502 "  # every stored record, for grep
 proxlet monitor                    # live table: rps, errors, latency per rule
 proxlet cert example.com           # Let's Encrypt certificate, HTTPS, auto-renewed
 proxlet ai                         # register the proxlet MCP server with your AI tools
@@ -37,7 +37,7 @@ Every change is validated before it is written and applied, so a bad rule never
 takes the server down. Everything on the command line tab-completes.
 
 **[Read the usage guide →](docs/usage.md)** for routes, targets, matching,
-settings and where proxlet keeps its files.
+settings, logs and where proxlet keeps its files.
 
 ## How it works
 
@@ -88,8 +88,8 @@ Work is specified with [OpenSpec](https://github.com/Fission-AI/OpenSpec) under
 
 1. **Core** — rules, standalone serving (proxy + static files), `start`/`stop`/`status`, `config` *(done)*
 2. **nginx attach** — port handoff, catch-all install, conflict warnings *(done)*
-3. **Certificates** — Let's Encrypt issuance and renewal, HTTPS *(in progress)*
-4. **Logs** — structured access and error logs, `proxlet logs`
+3. **Certificates** — Let's Encrypt issuance and renewal, HTTPS *(done)*
+4. **Logs** — structured access and error logs, `proxlet logs` *(done)*
 5. **Monitor** — live stats TUI
 6. **AI tools** — MCP server and `proxlet ai`
 

@@ -402,3 +402,18 @@ fn complete_a_selector() {
         ["/api", "example.com/", "example.com", "8000", "3000"]
     );
 }
+
+#[test]
+fn unwritable_log_directory_still_serves_and_warns() {
+    let home = Home::new();
+    // A file where the directory should be: it can never be created.
+    std::fs::create_dir_all(home.path().join("state")).unwrap();
+    std::fs::write(log_dir(&home), "not a directory").unwrap();
+    let daemon = home.start();
+    for _ in 0..5 {
+        assert_eq!(home.get("x", "/").0, 404);
+    }
+    let log = daemon.wait_for_log("cannot write the log in", Duration::from_secs(5));
+    assert_eq!(log.matches("cannot write the log in").count(), 1, "{log}");
+    assert_eq!(home.run(&["status"]).code, 0);
+}
