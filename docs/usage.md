@@ -372,6 +372,99 @@ If proxlet attached before it could forward HTTPS, `proxlet status` says
 `HTTPS is not forwarded to proxlet yet`; run `sudo proxlet start` again to add
 the port 443 block.
 
+## Logs
+
+The running server records every request it answers and its own messages,
+and `proxlet logs` reads them back, filtered and followed.
+
+```sh
+proxlet logs                       # the last 20 records, then follow new ones
+proxlet logs /api                  # only requests answered by the /api rule
+proxlet logs example.com --all     # every stored request for a domain, then exit
+proxlet logs 8000 --all --json     # requests proxied to port 8000, as JSON
+proxlet logs --all | grep " 502 "  # plain lines when piped
+```
+
+In a terminal each record is one aligned, coloured line; piped, the same text
+without colour:
+
+```text
+01:06:12.040  200  GET    example.com/api/users          12ms    512 B  → 127.0.0.1:8000
+01:06:13.501  502  GET    example.com/api                 1ms     96 B  → 127.0.0.1:8000  connection refused
+01:06:20.002  WARN        port 443 is already in use by caddy (pid 812); waiting for it to be free
+```
+
+Times are local; the date is added for records from another day. Ctrl-C stops
+following. `proxlet logs` reads the files directly, so it works while proxlet
+is stopped, and a crashed server's last records are still there.
+
+### Selectors
+
+- **A route**, starting with `/` or written `host/path` (`/api`,
+  `example.com/api`, `example.com/` for a host's root rule): requests answered
+  by exactly that rule.
+- **A number** (`8000`): requests proxied to an upstream on that port.
+- **Anything else** (`example.com`): requests for that host, whatever rule
+  answered them.
+
+Server events are shown only without a selector. Selectors tab-complete from
+your rules.
+
+### What is recorded
+
+Each request is recorded once its response has been sent, or the client went
+away: the time it arrived, the client address, method, host, path, status,
+bytes sent, duration, the rule and its upstream or directory, and for a proxy
+error the reason. Long responses and WebSockets are recorded when they end;
+for a WebSocket that is the `101` handshake, without the tunnelled bytes.
+Behind nginx, the client is the address nginx saw, not nginx itself.
+
+Query strings, headers and bodies are never recorded. Client addresses are
+personal data in some places: the files are readable only by the user proxlet
+runs as, and kept for 7 days by default. `proxlet config log.access off` stops
+recording requests; server events are still recorded.
+
+The server's own messages of level info and above (listening, port handovers,
+attaching, configuration changes, certificates) are recorded too, and still
+printed to the terminal or the journal as before.
+
+Recording never holds up a request. When records arrive faster than they can
+be written, or the disk refuses them, they are dropped, and a warning record
+later says how many.
+
+### The files
+
+Records are JSON, one object per line, in `~/.local/state/proxlet/logs/`
+(`/var/lib/proxlet/logs/` when proxlet runs as root without `sudo`). `proxlet.log` is the current
+file; at 10 MB it is renamed to `proxlet-<unix-millis>.log` and a new one is
+started. The oldest files are deleted so all of them together stay within
+`log.max_size` (`100MB`), and files older than `log.max_age` (`7d`) are
+deleted. Both apply immediately.
+
+`--json` prints the stored lines unchanged. The fields are stable:
+
+| Field    | Kind    | Meaning                                                         |
+| -------- | ------- | --------------------------------------------------------------- |
+| `t`      | both    | UTC time, RFC 3339 with milliseconds                            |
+| `kind`   | both    | `request` or `event`                                            |
+| `client` | request | Client address                                                  |
+| `method` | request | HTTP method                                                     |
+| `host`   | request | Lowercase host without the port; absent if the request had none |
+| `path`   | request | Path without the query                                          |
+| `status` | request | Response status                                                 |
+| `bytes`  | request | Body bytes sent                                                 |
+| `ms`     | request | Duration in milliseconds, to a tenth                            |
+| `rule`   | request | The rule that answered; absent when none did                    |
+| `target` | request | Upstream `host:port`, directory, `acme-challenge` or `redirect` |
+| `error`  | request | Why the upstream failed (502, 504)                              |
+| `level`  | event   | `info`, `warn` or `error`                                       |
+| `msg`    | event   | The message                                                     |
+
+```json
+{"t":"2026-11-24T01:06:13.501Z","kind":"request","client":"203.0.113.7","method":"GET","host":"example.com","path":"/api","status":502,"bytes":96,"ms":0.8,"rule":"/api","target":"127.0.0.1:8000","error":"connection refused"}
+{"t":"2026-11-24T01:06:20.002Z","kind":"event","level":"warn","msg":"port 443 is already in use by caddy (pid 812); waiting for it to be free"}
+```
+
 ## The configuration file
 
 Rules and settings live in one TOML file, which you can also edit by hand.
@@ -403,6 +496,7 @@ and refuses to overwrite it.
 | Configuration    | `~/.config/proxlet/proxlet.toml` |
 | State and socket | `~/.local/state/proxlet/`        |
 | Certificates     | `~/.local/state/proxlet/certs/`  |
+| Logs             | `~/.local/state/proxlet/logs/`   |
 
 - `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are respected.
 - `sudo proxlet ...` uses the invoking user's files, not root's.

@@ -3,5 +3,7 @@
 
 pub mod files;
 pub mod layer;
+pub mod read;
 pub mod record;
+pub mod show;
 pub mod writer;

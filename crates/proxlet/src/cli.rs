@@ -54,13 +54,21 @@ pub enum Command {
     },
     /// List all rules
     Ls,
-    /// Follow logs, optionally filtered by route, domain or port
+    /// Show the last requests and server events, then follow new ones
+    #[command(
+        after_help = "Examples:\n  proxlet logs\n  proxlet logs /api\n  proxlet logs example.com --all\n  proxlet logs 8000 --all --json"
+    )]
     Logs {
-        /// `/api`, `example.com` or `8000`; omit for everything
+        /// A route (`/api`), a domain (`example.com`) or an upstream port
+        /// (`8000`); omit for every request and server event
+        #[arg(add = ArgValueCompleter::new(complete::log_selectors))]
         selector: Option<String>,
-        /// Print all available logs and exit instead of following
+        /// Print every stored record, oldest first, and exit
         #[arg(long)]
         all: bool,
+        /// Print the stored JSON records instead of aligned lines
+        #[arg(long)]
+        json: bool,
     },
     /// Get Let's Encrypt certificates: `proxlet cert <domain>…`, or `ls`, `rm`, `renew`
     #[command(

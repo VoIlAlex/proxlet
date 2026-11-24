@@ -20,11 +20,11 @@
 
 ## 4. `proxlet logs` (proxlet)
 
-- [ ] 4.1 Replace the `logs` stub: `proxlet logs [<selector>] [--all] [--json]` with selector parsing (port, route, domain) and its errors; verify with CLI parse tests and a test that an invalid selector exits non-zero
-- [ ] 4.2 Implement `--all` (oldest first across files) and the default last-20-then-follow, with a `Follower` that survives rotation through the open handle (decision 6); verify with CLI tests for "All history", "Follow" (a new request appears within a second), "Rotation while following" (no loss or repeat, using the small file size hook), no records yet, and reading while the server is stopped
-- [ ] 4.3 Implement the output (decision 7): aligned terminal lines with status and level colours, the same text without colour when piped, `--json` byte for byte; filtering by selector, with events shown only without one; verify with unit tests for line formatting and CLI tests for "By route", "By domain", "By upstream port", "Piped" and "JSON"
-- [ ] 4.4 Add selector completion (rule routes, host-rule domains, upstream ports); verify with a completion test for "Complete a selector"
-- [ ] 4.5 Document logs in `docs/usage.md`: what is recorded and what never is, the JSON fields, selectors, following, retention, and where the files are
+- [x] 4.1 Replace the `logs` stub: `proxlet logs [<selector>] [--all] [--json]` with selector parsing (port, route, domain) and its errors; verify with CLI parse tests and a test that an invalid selector exits non-zero
+- [x] 4.2 Implement `--all` (oldest first across files) and the default last-20-then-follow, with a `Follower` that survives rotation through the open handle (decision 6); verify with CLI tests for "All history", "Follow" (a new request appears within a second), "Rotation while following" (no loss or repeat, using the small file size hook), no records yet, and reading while the server is stopped
+- [x] 4.3 Implement the output (decision 7): aligned terminal lines with status and level colours, the same text without colour when piped, `--json` byte for byte; filtering by selector, with events shown only without one; verify with unit tests for line formatting and CLI tests for "By route", "By domain", "By upstream port", "Piped" and "JSON"
+- [x] 4.4 Add selector completion (rule routes, host-rule domains, upstream ports); verify with a completion test for "Complete a selector"
+- [x] 4.5 Document logs in `docs/usage.md`: what is recorded and what never is, the JSON fields, selectors, following, retention, and where the files are
 
 ## 5. End to end and release notes
 

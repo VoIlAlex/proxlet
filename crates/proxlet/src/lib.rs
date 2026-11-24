@@ -81,7 +81,11 @@ fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
         Command::Handoff { action, socket } => {
             commands::handoff::run(locations, *action, socket.as_deref())
         }
-        Command::Logs { .. } => not_yet("logs", "structured logs"),
+        Command::Logs {
+            selector,
+            all,
+            json,
+        } => commands::logs::run(locations, selector.as_deref(), *all, *json),
         Command::Cert {
             action,
             domains,
