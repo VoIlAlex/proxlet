@@ -31,6 +31,17 @@ pub fn rule_routes(current: &OsStr) -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// Supported AI tools, for `proxlet ai`.
+#[must_use]
+pub fn ai_tools(current: &OsStr) -> Vec<CompletionCandidate> {
+    let current = current.to_string_lossy();
+    proxlet_ai::TOOL_IDS
+        .iter()
+        .filter(|id| id.starts_with(current.as_ref()))
+        .map(|id| CompletionCandidate::new(*id))
+        .collect()
+}
+
 /// Hosts of existing host rules, for `proxlet cert`.
 #[must_use]
 pub fn rule_hosts(current: &OsStr) -> Vec<CompletionCandidate> {

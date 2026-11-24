@@ -1,9 +1,11 @@
 //! Command implementations.
 
+pub mod ai;
 pub mod cert;
 pub mod config;
 pub mod handoff;
 pub mod logs;
+pub mod mcp;
 pub mod monitor;
 pub mod rules;
 pub mod service;

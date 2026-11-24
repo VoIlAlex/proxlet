@@ -504,6 +504,63 @@ request down, works with `log.access off`, and starts again from zero when the
 server restarts. A rule keeps its numbers when its target changes; removing
 it and adding it again starts it from zero.
 
+## AI tools
+
+proxlet includes an MCP server, so AI coding tools such as Claude Code and
+Cursor can read and change your rules. `proxlet ai` registers the server with
+the tools installed on your machine:
+
+```sh
+proxlet ai                  # show which tools are connected, then ask to connect the rest
+proxlet ai cursor --yes     # connect one tool without asking
+proxlet ai rm               # disconnect proxlet from every tool
+```
+
+```text
+✓ claude-code  connected (user scope, ~/.claude.json)
+○ cursor       not connected (~/.cursor/mcp.json)
+? Connect proxlet to Cursor? [y/N]
+```
+
+The server is registered at user scope, so it is available in every project,
+and points at the `proxlet` binary you ran. If you later install proxlet
+somewhere else, run `proxlet ai` again to repair the registration. Restart the
+AI tool, or reload its MCP servers, after connecting.
+
+| Tool | How it is registered |
+| --- | --- |
+| Claude Code | `claude mcp add --scope user proxlet -- <path to proxlet> mcp`; proxlet only reads `~/.claude.json` to show the status |
+| Cursor | The `proxlet` entry in `~/.cursor/mcp.json`. Other entries are kept, the previous file is saved as `~/.cursor/mcp.json.proxlet-backup`, and a file proxlet cannot parse is left alone |
+
+### What AI tools can do
+
+| Tool | What it does |
+| --- | --- |
+| `status` | Whether proxlet is running, and how |
+| `list_rules` | Every rule: route, kind, target |
+| `get_settings` | Every setting with value, default and description |
+| `read_logs` | The latest log records (up to 500), optionally for a selector as in `proxlet logs` |
+| `get_stats` | The numbers `proxlet monitor` shows |
+| `add_rule` | Add a rule or change its target |
+| `remove_rule` | Remove a rule |
+| `set_setting` | Change a setting |
+
+Changes go through the same checks as the CLI: they are validated, saved
+atomically, applied live, and recorded as events in the logs (`rule added:
+/api → …`). The only differences from the CLI are these two:
+- A directory target must be an absolute path.
+- A rule for a host nginx already serves is refused unless the AI tool passes
+  `allow_front_conflict`.
+
+Certificates and starting or stopping the service stay CLI-only.
+
+### Other tools
+
+Any MCP client that runs stdio servers can use proxlet. Register the command
+`proxlet mcp` (use the absolute path of the binary) with no arguments other
+than `mcp`. `proxlet mcp` is hidden from `--help`, because it is meant to be
+started by those tools.
+
 ## The configuration file
 
 Rules and settings live in one TOML file, which you can also edit by hand.

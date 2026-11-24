@@ -2,35 +2,30 @@
 
 use std::time::Duration;
 
-use proxlet_core::{Change, ConfigFile, Locations, Route, Rule, Target, port};
-use proxlet_front::FrontConfig;
+use proxlet_core::{Locations, Target, port};
 
-use super::{note_not_running, submit};
+use super::note_not_running;
 use crate::attach;
 use crate::control::WireOutcome;
-use crate::output::{self, BOLD, CmdResult, DIM, Failure, WARN};
+use crate::ops::{self, FrontPolicy};
+use crate::output::{self, BOLD, CmdResult, DIM, WARN};
 
 /// `proxlet add ROUTE TARGET [--yes]`.
 pub fn add(locations: &Locations, route: &str, target: &str, yes: bool) -> CmdResult {
-    let raw_target = target;
-    let route: Route = route.parse()?;
     let cwd = std::env::current_dir()?;
-    let target = Target::parse(target, &cwd)?.validate()?;
-    check_front_conflict(locations, &route, raw_target, yes)?;
-    let submitted = submit(
-        locations,
-        &Change::AddRule(Rule {
-            route: route.clone(),
-            target: target.clone(),
-        }),
-    )?;
-    match submitted.outcome {
+    let policy = FrontPolicy::Ask {
+        yes,
+        confirm: &output::confirm,
+    };
+    let added = ops::add_rule(locations, route, target, &cwd, &policy)?;
+    let (route, target) = (&added.route, &added.target);
+    match added.changed.outcome {
         WireOutcome::Updated { previous } => {
             output::success(format!("Updated {route} → {target} (was {previous})"));
         }
         _ => output::success(format!("Added {route} → {target}")),
     }
-    if let Target::Upstream(u) = &target
+    if let Target::Upstream(u) = target
         && !port::is_listening(&u.host, u.port, Duration::from_millis(300))
     {
         output::warn(format!(
@@ -38,83 +33,22 @@ pub fn add(locations: &Locations, route: &str, target: &str, yes: bool) -> CmdRe
             u.authority()
         ));
     }
-    if !submitted.live {
+    if !added.changed.live {
         note_not_running();
     }
     Ok(())
 }
 
-/// Warns when the front server already serves the rule's host, and asks.
-fn check_front_conflict(
-    locations: &Locations,
-    route: &Route,
-    raw_target: &str,
-    yes: bool,
-) -> CmdResult {
-    let Some(host) = route.host() else {
-        return Ok(());
-    };
-    let (_, config) = ConfigFile::new(locations.config_file()).read()?;
-    let Some((front, cfg)) = attach::front_config(&config.settings) else {
-        return Ok(());
-    };
-    let port = config.settings.http_port;
-    let conflict = Conflict {
-        front,
-        cfg: &cfg,
-        port,
-        route,
-        raw_target,
-    };
-    conflict.decide(host, yes, &output::confirm)
-}
-
-struct Conflict<'a> {
-    front: &'a str,
-    cfg: &'a FrontConfig,
-    port: u16,
-    route: &'a Route,
-    raw_target: &'a str,
-}
-
-impl Conflict<'_> {
-    fn decide(&self, host: &str, yes: bool, confirm: &dyn Fn(&str) -> Option<bool>) -> CmdResult {
-        let Some(claim) = self.cfg.claims(host, self.port) else {
-            return Ok(());
-        };
-        let front = self.front;
-        output::warn(format!(
-            "{front} serves {host} ({}); requests for it will not reach proxlet",
-            claim.at
-        ));
-        if yes {
-            return Ok(());
-        }
-        match confirm("Add the rule anyway?") {
-            Some(true) => Ok(()),
-            Some(false) => Err(Failure::new("nothing was added")),
-            None => Err(Failure::new(format!(
-                "not adding a rule for a host {front} serves without confirmation"
-            ))
-            .hint(format!(
-                "To add it anyway: proxlet add {} {} --yes",
-                self.route, self.raw_target
-            ))),
-        }
-    }
-}
-
 /// `proxlet rm ROUTE`.
 pub fn rm(locations: &Locations, route: &str) -> CmdResult {
-    let route: Route = route.parse()?;
-    let submitted = submit(locations, &Change::RemoveRule(route.clone()))?;
-    match submitted.outcome {
+    let (route, changed) = ops::remove_rule(locations, route)?;
+    match changed.outcome {
         WireOutcome::Removed { previous } => {
             output::success(format!("Removed {route} (was → {previous})"));
         }
         _ => output::success(format!("Removed {route}")),
     }
-    if !submitted.live {
+    if !changed.live {
         note_not_running();
     }
     Ok(())
@@ -122,26 +56,19 @@ pub fn rm(locations: &Locations, route: &str) -> CmdResult {
 
 /// `proxlet ls`.
 pub fn ls(locations: &Locations) -> CmdResult {
-    let (_, config) = ConfigFile::new(locations.config_file()).read()?;
-    if config.rules.is_empty() {
+    let rules = ops::rules(locations)?;
+    if rules.is_empty() {
         anstream::eprintln!("No rules yet. Add one with: {BOLD}proxlet add /api 8000{BOLD:#}");
         return Ok(());
     }
-    let mut rules = config.rules;
-    rules.sort_by(|a, b| {
-        (a.route.host().is_some(), a.route.host(), a.route.path()).cmp(&(
-            b.route.host().is_some(),
-            b.route.host(),
-            b.route.path(),
-        ))
-    });
-    let front = attach::front_config(&config.settings);
+    let settings = ops::settings(locations)?;
+    let front = attach::front_config(&settings);
     let rows: Vec<[String; 4]> = rules
         .iter()
         .map(|r| {
             let shadowed = r.route.host().and_then(|host| {
                 let (name, cfg) = front.as_ref()?;
-                let claim = cfg.claims(host, config.settings.http_port)?;
+                let claim = cfg.claims(host, settings.http_port)?;
                 Some(format!("served by {name} ({})", claim.at))
             });
             [
@@ -238,64 +165,6 @@ mod tests {
         assert_eq!(
             plain(&rows()),
             "/api\tproxy\thttp://127.0.0.1:8000\t\nexample.com/files\tfiles\t/home/me/site\t\n"
-        );
-    }
-
-    fn shadowing_config() -> FrontConfig {
-        use proxlet_front::config::{Listen, ServerBlock, ServerName};
-        let at = proxlet_front::Location {
-            file: "/etc/nginx/sites-enabled/site".into(),
-            line: 3,
-        };
-        FrontConfig {
-            servers: vec![ServerBlock {
-                listens: vec![Listen {
-                    port: 80,
-                    ipv6: false,
-                    default_flag: None,
-                    at: at.clone(),
-                }],
-                names: vec![ServerName {
-                    name: "site.example".into(),
-                    at: at.clone(),
-                }],
-                at,
-                managed: false,
-            }],
-            ..FrontConfig::default()
-        }
-    }
-
-    #[test]
-    fn conflict_answers() {
-        let cfg = shadowing_config();
-        let route: Route = "site.example".parse().unwrap();
-        let c = Conflict {
-            front: "nginx",
-            cfg: &cfg,
-            port: 80,
-            route: &route,
-            raw_target: "3000",
-        };
-        assert!(c.decide("site.example", false, &|_| Some(true)).is_ok());
-        let declined = c
-            .decide("site.example", false, &|_| Some(false))
-            .unwrap_err();
-        assert_eq!(declined.message, "nothing was added");
-        let no_terminal = c.decide("site.example", false, &|_| None).unwrap_err();
-        assert!(
-            no_terminal.hints[0].contains("proxlet add site.example 3000 --yes"),
-            "{:?}",
-            no_terminal.hints
-        );
-        assert!(
-            c.decide("site.example", true, &|_| panic!("asked despite --yes"))
-                .is_ok()
-        );
-        // Hosts nginx does not serve are never asked about.
-        assert!(
-            c.decide("other.example", false, &|_| panic!("asked for a free host"))
-                .is_ok()
         );
     }
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use proxlet_core::{ConfigFile, Locations, port};
+use proxlet_core::{Change, ConfigFile, Locations, Outcome, port};
 use proxlet_front::FrontServer;
 use proxlet_server::tls::{CertResolver, server_config};
 use proxlet_server::{Connections, Engine, Origin, Snapshot};
@@ -598,6 +598,27 @@ fn status_reply(state: &State) -> Reply {
     }
 }
 
+/// The event recorded for an applied change.
+fn describe_change(change: &Change, outcome: &Outcome) -> String {
+    match (change, outcome) {
+        (Change::AddRule(rule), Outcome::Updated { previous }) => {
+            format!(
+                "rule updated: {} → {} (was {previous})",
+                rule.route, rule.target
+            )
+        }
+        (Change::AddRule(rule), _) => format!("rule added: {} → {}", rule.route, rule.target),
+        (Change::RemoveRule(route), Outcome::Removed { previous }) => {
+            format!("rule removed: {route} (was → {previous})")
+        }
+        (Change::RemoveRule(route), _) => format!("rule removed: {route}"),
+        (Change::SetSetting(def, value), Outcome::SettingChanged { previous, .. }) => {
+            format!("setting changed: {} {value} (was {previous})", def.key)
+        }
+        (Change::SetSetting(def, value), _) => format!("setting changed: {} {value}", def.key),
+    }
+}
+
 fn stats_reply(state: &State) -> Reply {
     Reply {
         stats: Some(StatsReply::from_engine(
@@ -621,10 +642,12 @@ async fn handle(state: &Arc<State>, request: Request) -> Reply {
             // Serialise applies so snapshots are swapped in the order they were written.
             let _guard = state.apply_lock.lock().await;
             let file = state.file.clone();
+            let applied = change.clone();
             let result = tokio::task::spawn_blocking(move || pipeline::apply(&file, &change)).await;
             match result {
                 Ok(Ok((outcome, snapshot))) => {
                     state.engine.replace(snapshot);
+                    tracing::info!("{}", describe_change(&applied, &outcome));
                     Reply {
                         outcome: Some(WireOutcome::from(&outcome)),
                         ..Reply::ok()

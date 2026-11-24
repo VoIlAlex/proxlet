@@ -11,7 +11,9 @@ pub mod complete;
 pub mod control;
 pub mod daemon;
 pub mod logs;
+pub mod mcp;
 pub mod monitor;
+pub mod ops;
 pub mod output;
 pub mod pipeline;
 pub mod ports;
@@ -23,8 +25,8 @@ use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use proxlet_core::Locations;
 
-use crate::cli::{CertAction, Cli, Command};
-use crate::output::{CmdResult, Failure};
+use crate::cli::{AiAction, CertAction, Cli, Command};
+use crate::output::CmdResult;
 
 /// Entry point for the `proxlet` binary.
 pub fn main() -> ExitCode {
@@ -98,16 +100,10 @@ fn dispatch(command: &Command, locations: &Locations) -> CmdResult {
             Some(CertAction::Renew { domains }) => commands::cert::renew(locations, domains),
         },
         Command::Monitor { once } => commands::monitor::run(locations, *once),
-        Command::Ai => not_yet("ai", "AI tools"),
+        Command::Ai { action, tools, yes } => match action {
+            None => commands::ai::connect(tools, *yes),
+            Some(AiAction::Rm { tools }) => commands::ai::rm(tools),
+        },
+        Command::Mcp => commands::mcp::run(locations),
     }
-}
-
-fn not_yet(command: &str, change: &str) -> CmdResult {
-    Err(
-        Failure::new(format!("`proxlet {command}` is not available yet"))
-            .hint(format!(
-                "It arrives with the {change} change; see openspec/changes."
-            ))
-            .code(2),
-    )
 }
